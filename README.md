@@ -1,104 +1,132 @@
-# 🚀 MatMul-Free LLM: 1.58-Bit Ternary Large Language Model Engine
+# matmul-free
 
-> **A Multiplication-Free Transformer Engine in C++**  
-> Eliminating $O(n^3)$ Matrix Multiplication (GEMM) using **1.58-Bit Ternary Quantization $\{-1, 0, +1\}$**, **Pre-LN RMSNorm Stabilization**, **Analytical Backpropagation**, and **Iterative BPE Subword Tokenization**.
+A small transformer language model written from scratch in C++ that avoids traditional
+BLAS-style matrix multiplication — attention, the feed-forward network, and the output
+projection are all computed with explicit dot-product loops, and the feed-forward weights
+can be quantized to ternary `{-1, 0, +1}` values (BitNet-style "1.58-bit" weights) so that
+multiplication is replaced with conditional addition/subtraction.
 
----
-
-## 💡 Executive Summary & Core Thesis
-
-Traditional Large Language Models (LLMs) spend over 80% of their execution time bound by **Floating-Point Matrix Multiplication (GEMM)** ($Y = W \cdot X$). 
-
-This repository implements a **MatMul-Free LLM Engine** that replaces dense matrix multiplications with **ternary weight additions and subtractions**. 
-
-### Key Technical Achievements:
-- ⚡ **2.42x Speedup**: BitLinear Packed 2-Bit SIMD kernel runs in **4.086 ms** vs. **9.892 ms** FP32 GEMM.
-- 📦 **16.00x Memory Footprint Reduction**: Weight matrices compressed from **1024 KB** down to **64 KB**.
-- 🧠 **Coherent Subword Text Generation**: Produces clean, grammatical text (e.g., *"the smart fox served as the principal mentor guiding student project"*).
-- 🛡️ **Zero NaN Explosions**: Pre-LN Sub-LN architecture with analytical `rmsnorm_backward` gradient flow.
+This README documents what's actually in the repo today, how to build and run it, what each
+part of the code does, and — honestly — what its current limitations are. It's a hobby/
+research-style project, not a production inference engine.
 
 ---
 
-## 🔬 Mathematical Architecture & Innovations
+## What this project actually is
 
-### 1. BitLinear 1.58-Bit Ternary Quantization
-Weight matrices are quantized into ternary values $W \in \{-1, 0, +1\}$ scaled by a scalar $\gamma$:
-$$\gamma = \frac{1}{n \cdot m} \sum_{i,j} |W_{i,j}|$$
-$$W_{\text{ternary}} = \text{Round}\left(\frac{W}{\gamma + \epsilon}\right) \in \{-1, 0, +1\}$$
+- A **3-layer, 128-dim, 4-head transformer** with causal self-attention, rotary position
+  embeddings (RoPE), a GELU feed-forward network, and Pre-LN RMSNorm before each sub-layer.
+- A **from-scratch autodiff-free backward pass** — gradients for every layer (attention
+  Q/K/V, RMSNorm, FFN, output projection, token embeddings) are derived and coded by hand,
+  not computed by a framework.
+- A **real byte-pair-encoding (BPE) tokenizer** built from `corpus.txt`: it starts from
+  printable ASCII characters and iteratively merges the most frequent adjacent pair until it
+  hits a target vocabulary size (400 by default).
+- A **BitLinear ternary quantization path**: FFN weights can be quantized to `{-1, 0, +1}`
+  (scaled by a single float `gamma` per matrix) and the forward pass computed with
+  additions/subtractions instead of multiplications. There's a quantization-aware training
+  (QAT) mode that trains the underlying float weights using a straight-through estimator so
+  they tolerate being rounded to ternary values at inference time.
+- **Sampling strategies** for generation: greedy, temperature scaling, top-k, and top-p
+  (nucleus) sampling.
+- **Checkpointing** (binary save/load of all weights) and a **micro-benchmark** comparing
+  plain FP32 dot products against the ternary/packed/AVX2 paths.
 
-During the forward pass, matrix multiplication collapses to element-wise conditional addition:
-$$Y_i = \gamma \cdot \left( \sum_{j: W_{i,j} = +1} X_j \; - \sum_{j: W_{i,j} = -1} X_j \right)$$
+### Current state (honest assessment)
 
-### 2. Pre-LN Sub-LN RMSNorm & Analytical Backpropagation
-To prevent activation variance from exploding across stacked transformer blocks over long training runs, activations are normalized before self-attention and FFN blocks using **Root Mean Square Normalization (RMSNorm)**:
-$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{N} \sum_{i=1}^N x_i^2 + \epsilon}}$$
+With the bundled 208-line `corpus.txt` and default settings, training converges to a very
+low loss (well under 1.0) within 30-80 epochs — at that scale, this means the model has
+largely **memorized the training corpus** rather than learned to generalize to genuinely
+new sentences. That's expected and fine for a demo of this size; don't read the "coherent"
+generation samples as evidence of general language understanding — most of them are
+paraphrases or direct recollections of lines in `corpus.txt`. Novel prompts that go beyond
+the training data will still produce broken, ungrammatical output.
 
-The exact analytical gradient w.r.t. the input vector $x$ is derived and implemented as:
-$$\frac{\partial L}{\partial x_i} = \frac{1}{\text{rms}(x)} \left[ \frac{\partial L}{\partial y_i} - y_i \cdot \frac{1}{N} \sum_{j=1}^N \left(\frac{\partial L}{\partial y_j} y_j\right) \right]$$
-
-### 3. Iterative Subword Byte-Pair Encoding (BPE)
-A custom subword BPE tokenizer dynamically builds a compact vocabulary (**400 tokens**) from `corpus.txt` by iteratively merging the most frequent adjacent character and subword pairs.
-- Gracefully handles unseen out-of-vocabulary words.
-- Eliminates whole-word vocabulary explosion and word-concatenation artifacts.
-
-### 4. Quantization-Aware Training (QAT) with STE
-Ternary quantization during fine-tuning uses the **Straight-Through Estimator (STE)** to pass gradients through non-differentiable ternary rounding operations during backpropagation.
+Training on this small a corpus is also numerically delicate: earlier versions of this
+project went to NaN or collapsed into repeating-token loops partway through training before
+Pre-LN RMSNorm, an analytical RMSNorm backward pass, and an explicit
+loss-explosion/flatline detector (which reverts to the last good checkpoint) were added.
+These safeguards are in place now, but if you significantly change the learning rate, model
+size, or corpus, instability can still resurface — watch the per-epoch loss log.
 
 ---
 
-## 📊 Performance & Memory Micro-Benchmark
+## Repository layout
 
-Evaluated on matrix dimension **512x512** across 100 iterations (5-trial median):
-
-| Execution Engine | Latency (ms) | Memory Footprint (KB) | Memory Reduction | Speedup |
-| :--- | :---: | :---: | :---: | :---: |
-| **FP32 MatMul (GEMM Baseline)** | `9.892 ms` | `1024 KB` | `1.00x` | `1.00x` |
-| **BitLinear Vector** | `5.544 ms` | `1024 KB` | `1.00x` | `1.78x` |
-| **Explicit AVX2 SIMD** | `4.249 ms` | `64 KB` | **16.00x** | **2.33x** |
-| **Packed 2-Bit SIMD (AVX2)** | **4.086 ms** | **64 KB** | **16.00x** | **2.42x** |
-
----
-
-## 💬 Live Generation Samples
-
-```text
-Autoregressive Sampling Generation Options:
-  Greedy (Prompt: 'once upon a '): 
-  "once upon a time a smart fox lived in the green forest..."
-
-  Temp=0.5 (Prompt: 'the smart '): 
-  "the smart fox smilement oun set sklationsavel..."
-
-  BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): 
-  "the smart fox served as the principal mentor guiding student project"
+```
+matmul-free/
+├── cpps.toml                    # Build config for the `cpps` runner (see below)
+├── corpus.txt                   # Training corpus (208 short story lines); falls back to
+│                                 # a small 15-sentence hardcoded corpus if absent
+├── TASKS.md                     # Project roadmap / phase checklist
+├── model_checkpoint.bin         # Written by Demo 10 the first time you run the program
+└── src/
+    ├── main.cpp                 # Entry point — runs 11 sequential demos (see below)
+    ├── math_utils.cpp           # Softmax, RMSNorm, GELU, ternary quantization, BitLinear
+    │                             # dot products, BPE tokenizer, byte-level tokenizer,
+    │                             # sampling, benchmarking
+    ├── model_layers.cpp         # Thin wrapper (implementations live in the header)
+    └── include/
+        ├── math_utils.h         # Declarations for the above + the BPETokenizer class
+        └── model_layers.h       # AttentionLayer, FFN, TransformerBlock, LanguageModel
 ```
 
 ---
 
-## 🛠️ How to Build and Run
+## How to build and run
 
-### Method A: Using `cpps` Runner (Recommended)
+### Option A — using the `cpps` tool (recommended)
 
-`cpps` is a fast C++ build runner tool designed for executing single or multi-file C++ projects seamlessly.
+[`cpps`](https://github.com/Najeer-k11/cpps) is a small cross-platform CLI that wraps
+compiler detection, project scaffolding, and build/run in one command (comparable to
+`cargo run` for Rust or `npm run` for Node). This repo already has a `cpps.toml`, so once
+`cpps` is installed you don't need to think about compiler flags at all.
 
-1. **Install `cpps`**:
-   Follow instructions at [https://github.com/Najeer-k11/cpps](https://github.com/Najeer-k11/cpps).
+1. **Install `cpps`** — pick whichever matches your platform:
+   - Windows: download the `.msi` from the [cpps Releases page](https://github.com/Najeer-k11/cpps/releases)
+     (adds it to `PATH` automatically), or run the PowerShell install script from the cpps repo.
+   - From source (any OS with a Rust toolchain): `cargo install --path .` inside a clone of
+     the cpps repo.
+   - `cpps doctor --fix` afterward will detect and, if needed, install a C++ compiler,
+     CMake/Ninja, and vcpkg for you.
 
-2. **Run the Project**:
-   Open a terminal in the project root directory and execute:
+2. **Run this project:**
    ```bash
+   cd matmul-free
    cpps run
    ```
+   `cpps` reads `cpps.toml`, compiles everything under `src/` with the flags below, and
+   immediately runs the resulting binary.
 
-`cpps` will automatically read `cpps.toml`, compile all source files with OpenMP and optimization flags (`-O3 -fopenmp -DUSE_GPU`), and launch the demo executable.
+`cpps.toml` in this repo currently specifies:
+```toml
+[project]
+name    = "matmul-free-1"
+version = "0.1.0"
+std     = "c++17"
 
----
+[compiler]
+preferred = "auto"
+flags     = ["-Wall", "-O3", "-DUSE_GPU", "-fopenmp"]
 
-### Method B: Native Compiler (GCC / Clang / MSVC)
+[build]
+src_dir = "src"
+out_dir = "build"
+entry   = "src/main.cpp"
+```
 
-If you prefer building directly with a custom C++ compiler:
+> **Note on `-DUSE_GPU`:** despite the name (and the `[GPU Acceleration: ENABLED]` line
+> printed at runtime), this project does **not** use CUDA/OpenCL or run anything on a GPU.
+> `is_gpu_accelerated()` just checks whether `_OPENMP` (or `USE_GPU`/`__CUDACC__`) is defined
+> at compile time, and the actual speedup comes entirely from `#pragma omp parallel for`
+> loops — i.e. multi-core CPU parallelism via OpenMP, not GPU compute. Worth knowing if
+> you're deciding whether a GPU matters here (it doesn't, currently).
 
-#### GCC / MinGW (Windows / Linux):
+### Option B — compiling directly with a C++ compiler
+
+No `cpps` required — just make sure your compiler supports C++17 and OpenMP.
+
+**GCC / Clang (Linux/macOS/MinGW):**
 ```bash
 g++ -O3 -std=c++17 -fopenmp -DUSE_GPU \
     src/main.cpp src/math_utils.cpp \
@@ -107,51 +135,112 @@ g++ -O3 -std=c++17 -fopenmp -DUSE_GPU \
 
 ./matmul_free_llm
 ```
+(Clang on macOS may need `-Xpreprocessor -fopenmp -lomp` instead, and `libomp` installed
+via `brew install libomp`, since Apple's Clang doesn't ship OpenMP support out of the box.)
 
-#### MSVC (Visual Studio Command Prompt):
+**MSVC (Developer Command Prompt for VS):**
 ```cmd
 cl /O2 /std:c++17 /openmp /I src\include src\main.cpp src\math_utils.cpp /Fe:matmul_free_llm.exe
 matmul_free_llm.exe
 ```
 
+OpenMP is optional — the code compiles and runs fine without `-fopenmp`, just single-threaded
+(and `[GPU Acceleration: DISABLED (Using CPU)]` will print instead).
+
 ---
 
-## 📂 Project Directory Structure
+## What happens when you run it
 
-```text
-matmul-free-1/
-├── cpps.toml                   # Build configuration file for cpps runner
-├── corpus.txt                  # 208-line story corpus for BPE training
-├── src/
-│   ├── main.cpp                # Demo suite (Demos 1-11: forward, backprop, QAT, BPE, benchmark)
-│   ├── math_utils.cpp          # BitLinear SIMD, RMSNorm, BPE tokenizer, OpenMP kernels
-│   └── include/
-│       ├── math_utils.h        # Mathematical utilities header & BPETokenizer class
-│       └── model_layers.h      # TransformerBlock, Attention, FFN, and LanguageModel class
-└── README.md                   # Comprehensive project documentation
+`main()` runs 11 demos back-to-back, all against one `LanguageModel` instance
+(hidden_dim=128, 4 heads, 3 layers, max_seq_len=128):
+
+| # | Demo | What it shows |
+|---|------|----------------|
+| 1 | Text Processing | Byte-level tokenization of a sample sentence |
+| 2 | Transformer Block Forward Pass | Runs one transformer block on the tokenized input |
+| 3 | Simple Text Generation | Generates 10 tokens from an **untrained** model (expect gibberish here — this is before any training happens) |
+| 4 | Attention Mechanism | Standalone run of the first block's attention layer |
+| 5 | Cross-Entropy Loss | Loss computed against a synthetic target sequence |
+| 6 | Feed-Forward Network | Standalone FFN forward pass on a constant input vector |
+| 7 | Model Training & Backpropagation | Loads `corpus.txt`, builds a 400-token BPE vocabulary, trains for 80 epochs with linear LR decay (0.025 → 0.0001), a 90/10 train/val split, per-epoch NaN/explosion detection, and best-checkpoint restoration |
+| 8 | BitLinear QAT | Quantizes the FFN's weight matrix to ternary and shows one BitLinear forward pass, then runs 30 epochs of quantization-aware fine-tuning (STE) at a lower learning rate (0.002) |
+| 9 | Sampling & BPE | Encodes/decodes a sentence through the BPE tokenizer, then generates from five different prompts using greedy / temperature / top-k / top-p / BitLinear sampling |
+| 10 | Checkpointing | Saves all weights to `model_checkpoint.bin` and reloads them into a fresh model instance to confirm round-tripping works |
+| 11 | Performance Benchmark | Times FP32 dot products vs. BitLinear vs. packed 2-bit vs. AVX2 on a 512×512 matrix, 100 iterations, 5-trial median |
+
+A representative (real) run produces training loss falling from ~5.8 to under 0.15 over the
+80-epoch main run, and generation samples like:
 ```
+Greedy: "once upon a time a smart fox lived in the green forest..."
+BitLinear: "the smart fox served as the principal mentor guiding student project"
+```
+and a benchmark table roughly like:
+```
+FP32 MatMul Latency:        ~9.9 ms
+BitLinear Latency:          ~5.5 ms
+Packed 2-Bit SIMD Latency:  ~4.1 ms
+Explicit AVX2 SIMD Latency: ~4.2 ms
+Memory Footprint Reduction: 16.00x smaller (1024 KB -> 64 KB, packed ternary storage)
+```
+Exact numbers vary by machine and by how training happened to converge on a given run.
 
 ---
 
-## 📜 Demo Walkthrough Overview
+## Key configuration knobs
 
-When executed, the project runs an automated 11-part verification test suite:
-1. **Text Processing & Byte/Subword Tokenization**
-2. **Transformer Block Multiplication-Free Forward Pass**
-3. **Autoregressive Text Generation**
-4. **Multi-Head Self-Attention Layer Execution**
-5. **Cross-Entropy Loss Computation**
-6. **Feed-Forward Network (FFN) Operations**
-7. **80-Epoch Active Model Training & Gradient Descent**
-8. **Quantization-Aware Training (QAT) fine-tuning over 30 epochs with STE**
-9. **BPE Token Encoding & Autoregressive Sampling (Greedy, Temp, Top-K, Top-P)**
-10. **Model Checkpointing (Binary Save & Reload)**
-11. **GEMM vs. BitLinear Performance Micro-Benchmark**
+All of these are set in `main.cpp` — there's no config file or CLI flags yet, so changing
+behavior means editing and recompiling.
+
+- **Model size** — `ModelConfig` in `main()`: `hidden_dim`, `num_heads`, `num_layers`,
+  `max_seq_len`.
+- **Training corpus** — put your own text in `corpus.txt` (one line per training example);
+  if that file is missing, a hardcoded 15-sentence fallback corpus is used instead.
+- **BPE vocabulary size** — `bpe.build_vocab_from_corpus(corpus, 400)` — the second argument
+  is the target vocabulary size (base ASCII characters + learned merges). Smaller corpora
+  should generally use a smaller target so each token gets enough training exposure.
+- **Main training** — `model.train(corpus, epochs, initial_lr, use_qat, &bpe)`. Set
+  `use_qat = true` to fine-tune with ternary-quantized forward passes (STE) instead of the
+  regular float forward pass; this is what Demo 8 does at a lower LR after Demo 7's normal
+  training.
+- **Generation** — `model.generate(prompt, max_length, temperature, top_k, top_p,
+  use_bitlinear, &bpe)`. Set `temperature = 0.0` for greedy decoding; `top_k = 0` disables
+  top-k filtering; `top_p = 1.0` disables nucleus filtering; `use_bitlinear = true` runs
+  inference through the ternary-quantized FFN weights instead of full float weights.
 
 ---
 
-## 🤝 Citation & References
+## Known limitations / things to be aware of
 
-- **BitNet b1.58 Paper**: *The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits* (Ma et al., 2024).
-- **MatMul-Free LLM Paper**: *Scalable MatMul-free Language Modeling* (Zhu et al., 2024).
-- **Build Tool**: [cpps runner by Najeer-k11](https://github.com/Najeer-k11/cpps).
+- **Tiny corpus → memorization, not generalization.** 208 lines is enough to overfit a
+  128-dim, 3-layer model quickly. Treat generation quality as a measure of "did it memorize
+  the corpus," not "can it write general English."
+- **Val-loss-based checkpoint selection can pick very early checkpoints.** With such a small
+  held-out validation split, val loss starts rising almost immediately once the model starts
+  fitting the training set, so the "best" checkpoint by val loss may be much less trained
+  (and less fluent) than a later one you'd prefer qualitatively. Check the per-epoch sample
+  generations logged during training, not just the final restored checkpoint, if output
+  quality matters more than validation-loss minimization.
+- **"GPU Acceleration" is OpenMP, not a GPU.** See the note under Option A above — there's
+  no CUDA/OpenCL code path in this repo currently.
+- **No CLI/config file yet** — model size, corpus path, training hyperparameters, and
+  generation parameters are all hardcoded in `main.cpp` and require a recompile to change.
+- **Single executable, no library API** — everything runs through the `main()` demo
+  sequence; there's no separate way to just call `generate()` on an already-trained
+  checkpoint without also re-running training first (unless you write your own small
+  driver that calls `load_model()` directly).
+
+---
+
+## Roadmap
+
+See `TASKS.md` for the phase-by-phase checklist (tokenization/backprop/optimizer → BitLinear
++ RMSNorm → sampling/BPE → checkpointing/benchmarking). All listed phases are currently
+checked off; future work would likely mean expanding the corpus, adding a proper train/
+inference CLI, and hardening the numerical-stability safeguards further (e.g. extending
+the explosion detector, tuning LR schedules per phase).
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
