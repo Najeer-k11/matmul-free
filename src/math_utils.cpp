@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <immintrin.h>
 #include <unordered_map>
+#include <map>
 #include <sstream>
 
 namespace matmul_free {
@@ -355,65 +356,127 @@ int sample_logits(const std::vector<float>& logits, float temperature, int top_k
 // ============================================================================
 
 BPETokenizer::BPETokenizer() {
-    // Populate simple BPE subword vocabulary
-    vocab_ = {
-        "<unk>", "<pad>", "the", "ing", "is", "a", "in", "to", "and", "of",
-        "matmul", "free", "language", "model", "deep", "learning", "without",
-        "matrix", "multiplication", " "
-    };
+    vocab_ = {"<unk>", "<pad>"};
     for (int i = 32; i < 128; ++i) {
         vocab_.push_back(std::string(1, static_cast<char>(i)));
     }
+    for (size_t i = 0; i < vocab_.size(); ++i) {
+        vocab_map_[vocab_[i]] = static_cast<int>(i);
+    }
 }
 
-void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpus) {
-    std::unordered_map<std::string, int> word_counts;
+void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpus, int target_vocab_size) {
+    vocab_ = {"<unk>", "<pad>"};
+    vocab_map_.clear();
+    merges_.clear();
+    
+    // Add base ASCII printable characters
+    for (int i = 32; i < 128; ++i) {
+        vocab_.push_back(std::string(1, static_cast<char>(i)));
+    }
+    for (size_t i = 0; i < vocab_.size(); ++i) {
+        vocab_map_[vocab_[i]] = static_cast<int>(i);
+    }
+
+    // Prepare character sequences for all corpus lines
+    std::vector<std::vector<std::string>> sequences;
     for (const auto& line : corpus) {
-        std::stringstream ss(line);
-        std::string word;
-        while (ss >> word) {
-            word_counts[word]++;
-            word_counts[" " + word]++;
+        if (line.empty()) continue;
+        std::vector<std::string> seq;
+        for (char c : line) {
+            unsigned char uc = static_cast<unsigned char>(c);
+            if (uc >= 32 && uc < 128) {
+                seq.push_back(std::string(1, c));
+            }
+        }
+        if (!seq.empty()) {
+            sequences.push_back(seq);
         }
     }
-    
-    // Sort words by frequency
-    std::vector<std::pair<int, std::string>> freq_words;
-    for (const auto& kv : word_counts) {
-        if (kv.first.length() >= 2) {
-            freq_words.push_back({kv.second, kv.first});
+
+    // Iterative BPE pair-merging loop
+    while (static_cast<int>(vocab_.size()) < target_vocab_size) {
+        std::map<std::pair<std::string, std::string>, int> pair_counts;
+        
+        for (const auto& seq : sequences) {
+            if (seq.size() < 2) continue;
+            for (size_t i = 0; i + 1 < seq.size(); ++i) {
+                pair_counts[{seq[i], seq[i + 1]}]++;
+            }
         }
-    }
-    std::sort(freq_words.rbegin(), freq_words.rend());
-    
-    for (const auto& item : freq_words) {
-        if (std::find(vocab_.begin(), vocab_.end(), item.second) == vocab_.end()) {
-            vocab_.push_back(item.second);
+
+        if (pair_counts.empty()) break;
+
+        // Find most frequent pair
+        std::pair<std::string, std::string> best_pair;
+        int max_freq = 0;
+        for (const auto& kv : pair_counts) {
+            if (kv.second > max_freq) {
+                max_freq = kv.second;
+                best_pair = kv.first;
+            }
+        }
+
+        if (max_freq < 2) break; // Stop merging if no pair appears at least twice
+
+        std::string new_token = best_pair.first + best_pair.second;
+        merges_.push_back(best_pair);
+        int new_id = static_cast<int>(vocab_.size());
+        vocab_.push_back(new_token);
+        vocab_map_[new_token] = new_id;
+
+        // Replace occurrences of best_pair in sequences
+        for (auto& seq : sequences) {
+            std::vector<std::string> new_seq;
+            size_t i = 0;
+            while (i < seq.size()) {
+                if (i + 1 < seq.size() && seq[i] == best_pair.first && seq[i + 1] == best_pair.second) {
+                    new_seq.push_back(new_token);
+                    i += 2;
+                } else {
+                    new_seq.push_back(seq[i]);
+                    i++;
+                }
+            }
+            seq = new_seq;
         }
     }
 }
 
 std::vector<int> BPETokenizer::encode(const std::string& text) const {
-    std::vector<int> tokens;
-    size_t pos = 0;
-    while (pos < text.length()) {
-        int best_idx = -1;
-        size_t best_len = 0;
-        
-        for (size_t i = 2; i < vocab_.size(); ++i) {
-            const auto& token_str = vocab_[i];
-            if (token_str.length() > best_len && text.substr(pos, token_str.length()) == token_str) {
-                best_idx = static_cast<int>(i);
-                best_len = token_str.length();
+    std::vector<std::string> symbols;
+    for (char c : text) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 32 && uc < 128) {
+            symbols.push_back(std::string(1, c));
+        }
+    }
+
+    if (symbols.empty()) return {};
+
+    // Apply learned BPE merges in sequence
+    for (const auto& merge : merges_) {
+        std::vector<std::string> new_symbols;
+        size_t i = 0;
+        while (i < symbols.size()) {
+            if (i + 1 < symbols.size() && symbols[i] == merge.first && symbols[i + 1] == merge.second) {
+                new_symbols.push_back(merge.first + merge.second);
+                i += 2;
+            } else {
+                new_symbols.push_back(symbols[i]);
+                i++;
             }
         }
-        
-        if (best_idx != -1) {
-            tokens.push_back(best_idx);
-            pos += best_len;
+        symbols = new_symbols;
+    }
+
+    std::vector<int> tokens;
+    for (const auto& sym : symbols) {
+        auto it = vocab_map_.find(sym);
+        if (it != vocab_map_.end()) {
+            tokens.push_back(it->second);
         } else {
             tokens.push_back(0); // <unk>
-            pos++;
         }
     }
     return tokens;
@@ -423,8 +486,9 @@ std::string BPETokenizer::decode(const std::vector<int>& tokens) const {
     std::string text;
     for (int token : tokens) {
         if (token >= 0 && token < static_cast<int>(vocab_.size())) {
-            if (token == 0) text += "?";
-            else if (token != 1) text += vocab_[token];
+            if (token == 0) continue; // Skip <unk>
+            if (token == 1) continue; // Skip <pad>
+            text += vocab_[token];
         }
     }
     return text;

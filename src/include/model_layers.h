@@ -419,13 +419,15 @@ struct TransformerBlock {
     int input_dim;             // Input dimension (token embeddings)
     
     /**
-     * Forward pass through transformer block.
+     * Forward pass through transformer block (Pre-LN architecture).
      */
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs) {
-        // Apply self-attention
-        std::vector<std::vector<float>> after_attention = attention.forward(inputs);
+        std::vector<std::vector<float>> norm_inputs(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            norm_inputs[i] = rmsnorm(inputs[i]);
+        }
+        std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs);
         
-        // Add residual connection (element-wise addition)
         std::vector<std::vector<float>> after_residual = inputs;
         for (size_t i = 0; i < inputs.size(); ++i) {
             for (size_t j = 0; j < inputs[i].size(); ++j) {
@@ -433,10 +435,10 @@ struct TransformerBlock {
             }
         }
         
-        // Apply feed-forward network to every token + second residual connection
         std::vector<std::vector<float>> ff_output(after_residual.size());
         for (size_t i = 0; i < after_residual.size(); ++i) {
-            std::vector<float> ffn_out = ffn.forward(after_residual[i]);
+            std::vector<float> norm_res = rmsnorm(after_residual[i]);
+            std::vector<float> ffn_out = ffn.forward(norm_res);
             ff_output[i].resize(after_residual[i].size());
             for (size_t j = 0; j < after_residual[i].size(); ++j) {
                 ff_output[i][j] = after_residual[i][j] + ffn_out[j];
@@ -450,7 +452,12 @@ struct TransformerBlock {
      * BitLinear 1.58-bit Forward Pass.
      */
     std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs) {
-        std::vector<std::vector<float>> after_attention = attention.forward(inputs);
+        std::vector<std::vector<float>> norm_inputs(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            norm_inputs[i] = rmsnorm(inputs[i]);
+        }
+        std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs);
+        
         std::vector<std::vector<float>> after_residual = inputs;
         for (size_t i = 0; i < inputs.size(); ++i) {
             for (size_t j = 0; j < inputs[i].size(); ++j) {
@@ -460,7 +467,8 @@ struct TransformerBlock {
         
         std::vector<std::vector<float>> ff_output(after_residual.size());
         for (size_t i = 0; i < after_residual.size(); ++i) {
-            std::vector<float> ffn_out = ffn.forward_bitlinear(after_residual[i]);
+            std::vector<float> norm_res = rmsnorm(after_residual[i]);
+            std::vector<float> ffn_out = ffn.forward_bitlinear(norm_res);
             ff_output[i].resize(after_residual[i].size());
             for (size_t j = 0; j < after_residual[i].size(); ++j) {
                 ff_output[i][j] = after_residual[i][j] + ffn_out[j];
@@ -477,8 +485,11 @@ struct TransformerBlock {
                              const std::vector<std::vector<float>>& output_grads,
                              float lr,
                              std::vector<std::vector<float>>& input_grads) {
-        // Recompute after_attention and after_residual from forward pass
-        std::vector<std::vector<float>> after_attention = attention.forward(inputs);
+        std::vector<std::vector<float>> norm_inputs(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            norm_inputs[i] = rmsnorm(inputs[i]);
+        }
+        std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs);
         std::vector<std::vector<float>> after_residual = inputs;
         for (size_t i = 0; i < inputs.size(); ++i) {
             for (size_t j = 0; j < inputs[i].size(); ++j) {
@@ -489,22 +500,18 @@ struct TransformerBlock {
         size_t num_tokens = inputs.size();
         std::vector<std::vector<float>> grad_after_residual(num_tokens, std::vector<float>(input_dim, 0.0f));
 
-        // 1. FFN backward: input to FFN was after_residual
         for (size_t i = 0; i < num_tokens && i < output_grads.size(); ++i) {
+            std::vector<float> norm_res = rmsnorm(after_residual[i]);
             std::vector<float> ffn_grad_in;
-            ffn.backward_and_update(after_residual[i], output_grads[i], lr, ffn_grad_in);
-            // Residual connection: ff_output = after_residual + ffn(after_residual)
+            ffn.backward_and_update(norm_res, output_grads[i], lr, ffn_grad_in);
             for (int d = 0; d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
                 grad_after_residual[i][d] = output_grads[i][d] + (d < static_cast<int>(ffn_grad_in.size()) ? ffn_grad_in[d] : 0.0f);
             }
         }
 
-        // 2. Attention backward: input to attention was inputs
-        // Residual connection: after_residual = inputs + after_attention
         std::vector<std::vector<float>> attn_grad_in;
-        attention.backward_and_update(inputs, grad_after_residual, lr, attn_grad_in);
+        attention.backward_and_update(norm_inputs, grad_after_residual, lr, attn_grad_in);
 
-        // 3. Combined input gradient: dL/d(inputs) = grad_after_residual + attn_grad_in
         input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
         for (size_t i = 0; i < num_tokens; ++i) {
             for (int d = 0; d < input_dim; ++d) {
@@ -806,6 +813,13 @@ public:
                 
                 // Compute cross-entropy loss
                 float loss = compute_loss(seq, tokens);
+                if (std::isnan(loss) || std::isinf(loss)) {
+                    std::cout << "  [WARNING] NaN/Inf loss detected at Epoch " << (epoch + 1) << "! Aborting and restoring best checkpoint.\n";
+                    token_embeddings = best_embeddings;
+                    transformer_blocks = best_blocks;
+                    vocab_projection = best_vocab;
+                    return;
+                }
                 total_train_loss += loss;
                 train_samples++;
                 

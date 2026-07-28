@@ -235,7 +235,7 @@ int main() {
     }
     
     BPETokenizer bpe;
-    bpe.build_vocab_from_corpus(corpus);
+    bpe.build_vocab_from_corpus(corpus, 400);
     model.resize_vocab(bpe.vocab_size());
 
     std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
