@@ -53,22 +53,42 @@ size, or corpus, instability can still resurface — watch the per-epoch loss lo
 
 ## Repository layout
 
-```
+```text
 matmul-free/
 ├── cpps.toml                    # Build config for the `cpps` runner (see below)
-├── corpus.txt                   # Training corpus (208 short story lines); falls back to
-│                                 # a small 15-sentence hardcoded corpus if absent
+├── corpus.txt                   # Training corpus (208 short story lines)
 ├── TASKS.md                     # Project roadmap / phase checklist
+├── LICENSE                      # MIT License
 ├── model_checkpoint.bin         # Written by Demo 10 the first time you run the program
 └── src/
-    ├── main.cpp                 # Entry point — runs 11 sequential demos (see below)
-    ├── math_utils.cpp           # Softmax, RMSNorm, GELU, ternary quantization, BitLinear
-    │                             # dot products, BPE tokenizer, byte-level tokenizer,
-    │                             # sampling, benchmarking
-    ├── model_layers.cpp         # Thin wrapper (implementations live in the header)
-    └── include/
-        ├── math_utils.h         # Declarations for the above + the BPETokenizer class
-        └── model_layers.h       # AttentionLayer, FFN, TransformerBlock, LanguageModel
+    ├── main.cpp                 # Entry point — runs 11 sequential demos
+    ├── benchmark/
+    │   ├── benchmark.h
+    │   └── benchmark.cpp        # OpenMP & BitLinear micro-benchmarks
+    ├── core/
+    │   ├── math_ops.h
+    │   └── math_ops.cpp         # Softmax, matmul, GELU, RMSNorm, RoPE
+    ├── model/
+    │   ├── config.h             # ModelConfig struct
+    │   ├── attention.h
+    │   ├── attention.cpp        # Multi-head attention layer
+    │   ├── feed_forward.h
+    │   ├── feed_forward.cpp     # Feed-forward network (FFN)
+    │   ├── transformer_block.h
+    │   ├── transformer_block.cpp# Transformer block with Pre-LN RMSNorm
+    │   ├── language_model.h
+    │   └── language_model.cpp   # LanguageModel class & training/generation loops
+    ├── quantization/
+    │   ├── ternary.h
+    │   └── ternary.cpp          # Ternary quantization & SIMD/AVX2 kernels
+    ├── sampling/
+    │   ├── sampling.h
+    │   └── sampling.cpp         # Temperature, Top-K, Top-P sampling
+    └── tokenizer/
+        ├── byte_tokenizer.h
+        ├── byte_tokenizer.cpp   # Byte-level ASCII tokenizer
+        ├── bpe_tokenizer.h
+        └── bpe_tokenizer.cpp    # Subword BPE tokenizer
 ```
 
 ---
@@ -107,7 +127,7 @@ std     = "c++17"
 
 [compiler]
 preferred = "auto"
-flags     = ["-Wall", "-O3", "-DUSE_GPU", "-fopenmp"]
+flags     = ["-Wall", "-O3", "-fopenmp"]
 
 [build]
 src_dir = "src"
@@ -115,12 +135,7 @@ out_dir = "build"
 entry   = "src/main.cpp"
 ```
 
-> **Note on `-DUSE_GPU`:** despite the name (and the `[GPU Acceleration: ENABLED]` line
-> printed at runtime), this project does **not** use CUDA/OpenCL or run anything on a GPU.
-> `is_gpu_accelerated()` just checks whether `_OPENMP` (or `USE_GPU`/`__CUDACC__`) is defined
-> at compile time, and the actual speedup comes entirely from `#pragma omp parallel for`
-> loops — i.e. multi-core CPU parallelism via OpenMP, not GPU compute. Worth knowing if
-> you're deciding whether a GPU matters here (it doesn't, currently).
+---
 
 ### Option B — compiling directly with a C++ compiler
 
@@ -128,24 +143,27 @@ No `cpps` required — just make sure your compiler supports C++17 and OpenMP.
 
 **GCC / Clang (Linux/macOS/MinGW):**
 ```bash
-g++ -O3 -std=c++17 -fopenmp -DUSE_GPU \
-    src/main.cpp src/math_utils.cpp \
-    -I src/include \
+g++ -O3 -std=c++17 -fopenmp \
+    src/main.cpp \
+    src/core/*.cpp \
+    src/tokenizer/*.cpp \
+    src/quantization/*.cpp \
+    src/sampling/*.cpp \
+    src/model/*.cpp \
+    src/benchmark/*.cpp \
+    -I src \
     -o matmul_free_llm
 
 ./matmul_free_llm
 ```
-(Clang on macOS may need `-Xpreprocessor -fopenmp -lomp` instead, and `libomp` installed
-via `brew install libomp`, since Apple's Clang doesn't ship OpenMP support out of the box.)
 
 **MSVC (Developer Command Prompt for VS):**
 ```cmd
-cl /O2 /std:c++17 /openmp /I src\include src\main.cpp src\math_utils.cpp /Fe:matmul_free_llm.exe
+cl /O2 /std:c++17 /openmp /I src src\main.cpp src\core\*.cpp src\tokenizer\*.cpp src\quantization\*.cpp src\sampling\*.cpp src\model\*.cpp src\benchmark\*.cpp /Fe:matmul_free_llm.exe
 matmul_free_llm.exe
 ```
 
-OpenMP is optional — the code compiles and runs fine without `-fopenmp`, just single-threaded
-(and `[GPU Acceleration: DISABLED (Using CPU)]` will print instead).
+OpenMP is optional — the code compiles and runs fine without `-fopenmp`, just single-threaded.
 
 ---
 
@@ -170,12 +188,12 @@ OpenMP is optional — the code compiles and runs fine without `-fopenmp`, just 
 
 A representative (real) run produces training loss falling from ~5.8 to under 0.15 over the
 80-epoch main run, and generation samples like:
-```
+```text
 Greedy: "once upon a time a smart fox lived in the green forest..."
 BitLinear: "the smart fox served as the principal mentor guiding student project"
 ```
 and a benchmark table roughly like:
-```
+```text
 FP32 MatMul Latency:        ~9.9 ms
 BitLinear Latency:          ~5.5 ms
 Packed 2-Bit SIMD Latency:  ~4.1 ms
@@ -220,8 +238,8 @@ behavior means editing and recompiling.
   (and less fluent) than a later one you'd prefer qualitatively. Check the per-epoch sample
   generations logged during training, not just the final restored checkpoint, if output
   quality matters more than validation-loss minimization.
-- **"GPU Acceleration" is OpenMP, not a GPU.** See the note under Option A above — there's
-  no CUDA/OpenCL code path in this repo currently.
+- **Multi-threading Acceleration is OpenMP, not CUDA.** CPU multi-threading parallelism is
+  enabled via `#pragma omp parallel for` when OpenMP is available.
 - **No CLI/config file yet** — model size, corpus path, training hyperparameters, and
   generation parameters are all hardcoded in `main.cpp` and require a recompile to change.
 - **Single executable, no library API** — everything runs through the `main()` demo

@@ -5,7 +5,7 @@ std     = "c++17"
 
 [compiler]
 preferred = "auto"
-flags     = ["-Wall", "-O3", "-DUSE_GPU", "-fopenmp"]
+flags     = ["-Wall", "-O3", "-fopenmp"]
 
 [build]
 src_dir = "src"

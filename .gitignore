@@ -21,4 +21,5 @@ out/
 
 # Model Checkpoints & Artifacts
 *.bin
+.plans/
 model_checkpoint.bin

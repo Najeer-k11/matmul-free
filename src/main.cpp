@@ -9,7 +9,13 @@
  * - Numerical stability techniques (log-sum-exp)
  */
 
-#include "include/model_layers.h"
+#include "model/language_model.h"
+#include "tokenizer/byte_tokenizer.h"
+#include "tokenizer/bpe_tokenizer.h"
+#include "quantization/ternary.h"
+#include "sampling/sampling.h"
+#include "benchmark/benchmark.h"
+#include "core/math_ops.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
