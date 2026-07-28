@@ -72,15 +72,18 @@ struct FFN {
         auto t_weight2 = quantize_weights_ternary(weight2, scale2);
         return bitlinear_vector(t_weight2, norm_act, scale2);
     }
-    
     /**
      * Backward pass with weight gradient calculation & update.
+     * Computes grad_x w.r.t input vector x.
      */
-    void backward_and_update(const std::vector<float>& x, const std::vector<float>& output_grad, float lr) {
+    void backward_and_update(const std::vector<float>& x, const std::vector<float>& output_grad, float lr, std::vector<float>& grad_x) {
         int hd = static_cast<int>(weight1.size());
-        if (hd == 0 || x.empty()) return;
+        if (hd == 0 || x.empty()) {
+            grad_x.assign(input_dim, 0.0f);
+            return;
+        }
         
-        // Forward intermediate activations
+        // Forward intermediate activations for the exact x provided
         std::vector<float> hidden = matmul_vector(weight1, x);
         std::vector<float> activated(hidden.size());
         for (size_t i = 0; i < hidden.size(); ++i) {
@@ -117,6 +120,18 @@ struct FFN {
             grad_hidden[i] = gelu_deriv * grad_activated[i];
         }
 
+        // Grad wrt input x: grad_x = grad_hidden @ W1
+        grad_x.assign(input_dim, 0.0f);
+        for (int j = 0; j < input_dim; ++j) {
+            float sum = 0.0f;
+            for (int i = 0; i < hd; ++i) {
+                if (j < static_cast<int>(weight1[i].size())) {
+                    sum += weight1[i][j] * grad_hidden[i];
+                }
+            }
+            grad_x[j] = sum;
+        }
+
         // Update weight1: dL/dW1[i][j] = grad_hidden[i] * x[j]
         for (size_t i = 0; i < weight1.size() && i < grad_hidden.size(); ++i) {
             for (size_t j = 0; j < weight1[i].size() && j < x.size(); ++j) {
@@ -125,51 +140,12 @@ struct FFN {
             }
         }
     }
-    
+
     /**
-     * Backward pass (gradient computation).
+     * Legacy backward pass overload.
      */
     void backward(std::vector<float>& grad_x, const std::vector<float>& output_grad) {
-        int hd = static_cast<int>(weight1.size());
-        if (hd == 0 || output_grad.empty()) return;
-        
-        // Step 1: Backprop through W2
-        std::vector<float> grad_hidden(hd, 0.0f);
-        for (int i = 0; i < hd; ++i) {
-            float sum = 0.0f;
-            for (size_t j = 0; j < output_grad.size() && j < weight2.size(); ++j) {
-                if (i < static_cast<int>(weight2[j].size())) {
-                    sum += weight2[j][i] * output_grad[j];
-                }
-            }
-            grad_hidden[i] = sum;
-        }
-        
-        // Step 2: Backprop through GELU activation
-        static const float kSqrt2OverPi = std::sqrt(2.0f / 3.14159265f);
-        std::vector<float> grad_activated(hd);
-        for (int i = 0; i < hd; ++i) {
-            float x_val  = 0.0f;
-            float inner  = kSqrt2OverPi * (x_val + 0.044715f * x_val * x_val * x_val);
-            float tv     = std::tanh(inner);
-            float sech2  = 1.0f - tv * tv;
-            float gelu_deriv = 0.5f * (1.0f + tv)
-                             + 0.5f * x_val * sech2
-                             * kSqrt2OverPi * (1.0f + 3.0f * 0.044715f * x_val * x_val);
-            grad_activated[i] = gelu_deriv * grad_hidden[i];
-        }
-        
-        // Step 3: Backprop through W1
-        grad_x.assign(input_dim, 0.0f);
-        for (int i = 0; i < input_dim; ++i) {
-            float sum = 0.0f;
-            for (int j = 0; j < hd; ++j) {
-                if (i < static_cast<int>(weight1[j].size())) {
-                    sum += weight1[j][i] * grad_activated[j];
-                }
-            }
-            grad_x[i] = sum;
-        }
+        backward_and_update(grad_x, output_grad, 0.0f, grad_x);
     }
 };
 
@@ -268,50 +244,152 @@ struct AttentionLayer {
     }
 
     /**
-     * Backward pass with weight gradient calculation & update.
+     * Analytical backward pass with weight gradient calculation & update.
+     * Computes input_grads wrt layer inputs.
      */
     void backward_and_update(const std::vector<std::vector<float>>& inputs,
                              const std::vector<std::vector<float>>& output_grads,
-                             float lr) {
+                             float lr,
+                             std::vector<std::vector<float>>& input_grads) {
         int num_tokens = static_cast<int>(inputs.size());
         int num_heads  = static_cast<int>(query_weights.size());
+        input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
         if (num_tokens == 0 || num_heads == 0) return;
 
         for (int h = 0; h < num_heads; ++h) {
+            int head_dim = static_cast<int>(query_weights[h].size());
+            float scale  = head_dim > 0 ? 1.0f / std::sqrt(static_cast<float>(head_dim)) : 1.0f;
+
+            // Recompute K and V for all sequence positions j
+            std::vector<std::vector<float>> all_k(num_tokens);
+            std::vector<std::vector<float>> all_v(num_tokens);
+            for (int j = 0; j < num_tokens; ++j) {
+                all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j);
+                all_v[j] = matmul_vector(value_weights[h], inputs[j]);
+            }
+
+            // Forward Q, scores, and attention weights
+            std::vector<std::vector<float>> all_q(num_tokens);
+            std::vector<std::vector<float>> all_weights(num_tokens);
+            for (int i = 0; i < num_tokens; ++i) {
+                all_q[i] = apply_rope(matmul_vector(query_weights[h], inputs[i]), i);
+                std::vector<float> scores(i + 1, 0.0f);
+                float max_score = -1e9f;
+                for (int j = 0; j <= i; ++j) {
+                    float dot_val = 0.0f;
+                    for (int d = 0; d < head_dim && d < static_cast<int>(all_q[i].size()) && d < static_cast<int>(all_k[j].size()); ++d) {
+                        dot_val += all_q[i][d] * all_k[j][d];
+                    }
+                    scores[j] = dot_val * scale;
+                    if (scores[j] > max_score) max_score = scores[j];
+                }
+                float sum_exp = 0.0f;
+                std::vector<float> weights(i + 1, 0.0f);
+                for (int j = 0; j <= i; ++j) {
+                    weights[j] = std::exp(scores[j] - max_score);
+                    sum_exp += weights[j];
+                }
+                for (int j = 0; j <= i; ++j) {
+                    weights[j] /= (sum_exp + 1e-9f);
+                }
+                all_weights[i] = weights;
+            }
+
+            // Initialize per-head gradients
+            std::vector<std::vector<float>> grad_v(num_tokens, std::vector<float>(head_dim, 0.0f));
+            std::vector<std::vector<float>> grad_q(num_tokens, std::vector<float>(head_dim, 0.0f));
+            std::vector<std::vector<float>> grad_k(num_tokens, std::vector<float>(head_dim, 0.0f));
+
+            // Backprop through attention output calculation per query position i
             for (int i = 0; i < num_tokens && i < static_cast<int>(output_grads.size()); ++i) {
-                for (size_t r = 0; r < query_weights[h].size(); ++r) {
-                    for (size_t c = 0; c < query_weights[h][r].size() && c < inputs[i].size(); ++c) {
-                        float grad = (r < output_grads[i].size() ? output_grads[i][r] : 0.0f) * inputs[i][c];
-                        query_weights[h][r][c] -= lr * 0.01f * grad;
-                        key_weights[h][r][c]   -= lr * 0.01f * grad;
-                        value_weights[h][r][c] -= lr * 0.01f * grad;
+                // Output gradient for head h at position i (averaged over num_heads in forward pass)
+                std::vector<float> grad_head_out(head_dim, 0.0f);
+                for (int d = 0; d < head_dim && d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
+                    grad_head_out[d] = output_grads[i][d] / static_cast<float>(num_heads);
+                }
+
+                // Gradient wrt V_j and weights A_{i, j}
+                std::vector<float> grad_A(i + 1, 0.0f);
+                for (int j = 0; j <= i; ++j) {
+                    for (int d = 0; d < head_dim && d < static_cast<int>(all_v[j].size()); ++d) {
+                        grad_v[j][d] += all_weights[i][j] * grad_head_out[d];
+                        grad_A[j]    += grad_head_out[d] * all_v[j][d];
+                    }
+                }
+
+                // Softmax backward for position i
+                float sum_gA = 0.0f;
+                for (int j = 0; j <= i; ++j) {
+                    sum_gA += all_weights[i][j] * grad_A[j];
+                }
+
+                for (int j = 0; j <= i; ++j) {
+                    float grad_score = all_weights[i][j] * (grad_A[j] - sum_gA) * scale;
+                    for (int d = 0; d < head_dim && d < static_cast<int>(all_q[i].size()) && d < static_cast<int>(all_k[j].size()); ++d) {
+                        grad_q[i][d] += grad_score * all_k[j][d];
+                        grad_k[j][d] += grad_score * all_q[i][d];
+                    }
+                }
+            }
+
+            // Apply inverse RoPE (-pos) to Query and Key gradients
+            std::vector<std::vector<float>> grad_pre_q(num_tokens);
+            std::vector<std::vector<float>> grad_pre_k(num_tokens);
+            for (int i = 0; i < num_tokens; ++i) {
+                grad_pre_q[i] = apply_rope(grad_q[i], -i);
+                grad_pre_k[i] = apply_rope(grad_k[i], -i);
+            }
+
+            // Update Projection Weights
+            for (int i = 0; i < num_tokens; ++i) {
+                const auto& inp = inputs[i];
+                const auto& gq = grad_pre_q[i];
+                const auto& gk = grad_pre_k[i];
+                const auto& gv = grad_v[i];
+                int inp_sz = static_cast<int>(inp.size());
+                for (int r = 0; r < head_dim; ++r) {
+                    float q_r = gq[r] * lr;
+                    float k_r = gk[r] * lr;
+                    float v_r = gv[r] * lr;
+                    auto& qw_row = query_weights[h][r];
+                    auto& kw_row = key_weights[h][r];
+                    auto& vw_row = value_weights[h][r];
+                    for (int c = 0; c < input_dim && c < inp_sz; ++c) {
+                        float in_c = inp[c];
+                        qw_row[c] -= q_r * in_c;
+                        kw_row[c] -= k_r * in_c;
+                        vw_row[c] -= v_r * in_c;
+                    }
+                }
+            }
+
+            // Accumulate input gradients from W_q, W_k, W_v
+            for (int i = 0; i < num_tokens; ++i) {
+                const auto& gq = grad_pre_q[i];
+                const auto& gk = grad_pre_k[i];
+                const auto& gv = grad_v[i];
+                auto& in_g = input_grads[i];
+                for (int r = 0; r < head_dim; ++r) {
+                    float q_r = gq[r];
+                    float k_r = gk[r];
+                    float v_r = gv[r];
+                    const auto& qw_row = query_weights[h][r];
+                    const auto& kw_row = key_weights[h][r];
+                    const auto& vw_row = value_weights[h][r];
+                    for (int c = 0; c < input_dim && c < static_cast<int>(qw_row.size()); ++c) {
+                        in_g[c] += qw_row[c] * q_r + kw_row[c] * k_r + vw_row[c] * v_r;
                     }
                 }
             }
         }
     }
-    
+
     /**
-     * Backward pass (gradient computation).
+     * Backward pass overload.
      */
     void backward(std::vector<std::vector<float>>& input_grads, 
                   const std::vector<std::vector<float>>& output_grads) {
-        // Backpropagation through attention layer (simplified)
-        int num_tokens = static_cast<int>(output_grads.size());
-        
-        for (int i = 0; i < num_tokens; ++i) {
-            std::vector<float> grad_input(input_dim);
-            
-            for (int j = 0; j < input_dim; ++j) {
-                float sum = 0.0f;
-                for (size_t k = 0; k < output_grads[i].size(); ++k) {
-                    sum += output_grads[i][k];
-                }
-                grad_input[j] = sum / static_cast<float>(input_dim);
-            }
-            
-            input_grads[i] = grad_input;
-        }
+        backward_and_update(input_grads, output_grads, 0.0f, input_grads);
     }
 };
 
@@ -357,15 +435,70 @@ struct TransformerBlock {
     }
 
     /**
-     * Backward pass & weight update.
+     * BitLinear 1.58-bit Forward Pass.
+     */
+    std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs) {
+        std::vector<std::vector<float>> after_attention = attention.forward(inputs);
+        std::vector<std::vector<float>> after_residual = inputs;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            for (size_t j = 0; j < inputs[i].size(); ++j) {
+                after_residual[i][j] += after_attention[i][j];
+            }
+        }
+        
+        std::vector<std::vector<float>> ff_output(after_residual.size());
+        for (size_t i = 0; i < after_residual.size(); ++i) {
+            std::vector<float> ffn_out = ffn.forward_bitlinear(after_residual[i]);
+            ff_output[i].resize(after_residual[i].size());
+            for (size_t j = 0; j < after_residual[i].size(); ++j) {
+                ff_output[i][j] = after_residual[i][j] + ffn_out[j];
+            }
+        }
+        
+        return ff_output;
+    }
+
+    /**
+     * Backward pass & weight update with input gradient chaining.
      */
     void backward_and_update(const std::vector<std::vector<float>>& inputs,
                              const std::vector<std::vector<float>>& output_grads,
-                             float lr) {
-        for (size_t i = 0; i < inputs.size() && i < output_grads.size(); ++i) {
-            ffn.backward_and_update(inputs[i], output_grads[i], lr);
+                             float lr,
+                             std::vector<std::vector<float>>& input_grads) {
+        // Recompute after_attention and after_residual from forward pass
+        std::vector<std::vector<float>> after_attention = attention.forward(inputs);
+        std::vector<std::vector<float>> after_residual = inputs;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            for (size_t j = 0; j < inputs[i].size(); ++j) {
+                after_residual[i][j] += after_attention[i][j];
+            }
         }
-        attention.backward_and_update(inputs, output_grads, lr);
+
+        size_t num_tokens = inputs.size();
+        std::vector<std::vector<float>> grad_after_residual(num_tokens, std::vector<float>(input_dim, 0.0f));
+
+        // 1. FFN backward: input to FFN was after_residual
+        for (size_t i = 0; i < num_tokens && i < output_grads.size(); ++i) {
+            std::vector<float> ffn_grad_in;
+            ffn.backward_and_update(after_residual[i], output_grads[i], lr, ffn_grad_in);
+            // Residual connection: ff_output = after_residual + ffn(after_residual)
+            for (int d = 0; d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
+                grad_after_residual[i][d] = output_grads[i][d] + (d < static_cast<int>(ffn_grad_in.size()) ? ffn_grad_in[d] : 0.0f);
+            }
+        }
+
+        // 2. Attention backward: input to attention was inputs
+        // Residual connection: after_residual = inputs + after_attention
+        std::vector<std::vector<float>> attn_grad_in;
+        attention.backward_and_update(inputs, grad_after_residual, lr, attn_grad_in);
+
+        // 3. Combined input gradient: dL/d(inputs) = grad_after_residual + attn_grad_in
+        input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
+        for (size_t i = 0; i < num_tokens; ++i) {
+            for (int d = 0; d < input_dim; ++d) {
+                input_grads[i][d] = grad_after_residual[i][d] + (d < static_cast<int>(attn_grad_in[i].size()) ? attn_grad_in[i][d] : 0.0f);
+            }
+        }
     }
 };
 
@@ -642,17 +775,20 @@ public:
                 // Clip gradients to stabilize convergence
                 clip_grad_norm(hidden_grads, 1.0f);
 
-                // Backprop through transformer blocks in reverse order using correct layer input activations
+                // Backprop through transformer blocks in reverse order with gradient chaining
+                std::vector<std::vector<float>> curr_grads = hidden_grads;
                 for (int b = static_cast<int>(transformer_blocks.size()) - 1; b >= 0; --b) {
-                    transformer_blocks[b].backward_and_update(layer_inputs[b], hidden_grads, learning_rate);
+                    std::vector<std::vector<float>> next_grads;
+                    transformer_blocks[b].backward_and_update(layer_inputs[b], curr_grads, learning_rate, next_grads);
+                    curr_grads = next_grads;
                 }
 
-                // Update token embeddings
+                // Update token embeddings using chained gradient from layer 0
                 for (size_t t = 0; t < tokens.size(); ++t) {
                     int token_idx = tokens[t];
                     if (token_idx >= 0 && token_idx < static_cast<int>(token_embeddings.size())) {
                         for (int d = 0; d < config_.hidden_dim; ++d) {
-                            token_embeddings[token_idx][d] -= learning_rate * hidden_grads[t][d];
+                            token_embeddings[token_idx][d] -= learning_rate * curr_grads[t][d];
                         }
                     }
                 }
@@ -670,9 +806,11 @@ public:
     /**
      * Autoregressive Text Generation Loop.
      * Iteratively predicts and appends next tokens up to max_length.
+     * Option use_bitlinear toggles 1.58-bit ternary BitLinear inference.
      */
     std::string generate(const std::string& input_text, int max_length = 20,
-                         float temperature = 1.0f, int top_k = 0, float top_p = 1.0f) {
+                         float temperature = 1.0f, int top_k = 0, float top_p = 1.0f,
+                         bool use_bitlinear = false) {
         std::vector<int> tokens = tokenize_text(input_text, static_cast<int>(token_embeddings.size()));
         if (tokens.empty()) return input_text;
 
@@ -692,7 +830,11 @@ public:
             // Forward pass through transformer blocks
             std::vector<std::vector<float>> seq = input_seq;
             for (auto& block : transformer_blocks) {
-                seq = block.forward(seq);
+                if (use_bitlinear) {
+                    seq = block.forward_bitlinear(seq);
+                } else {
+                    seq = block.forward(seq);
+                }
             }
 
             if (seq.empty()) break;

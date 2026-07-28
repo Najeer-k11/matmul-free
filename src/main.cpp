@@ -221,8 +221,8 @@ int main() {
     };
     
     std::cout << "Training corpus size: " << corpus.size() << " sentences\n";
-    std::cout << "Starting active training over 80 epochs with tuned learning rate (0.015f)...\n";
-    model.train(corpus, 80, 0.015f);
+    std::cout << "Starting active training over 40 epochs with tuned learning rate (0.020f)...\n";
+    model.train(corpus, 40, 0.020f);
     std::cout << "Training complete!\n";
     
     // ========================================================================
@@ -278,6 +278,8 @@ int main() {
     std::cout << "  Temp=0.7 (Prompt: 'the smart '): \"" << model.generate("the smart ", 15, 0.7f) << "\"\n";
     std::cout << "  Top-K=5  (Prompt: 'the little'): \"" << model.generate("the little ", 15, 0.8f, 5) << "\"\n";
     std::cout << "  Top-P=0.9(Prompt: 'a friendly'): \"" << model.generate("a friendly ", 15, 0.8f, 0, 0.9f) << "\"\n";
+    std::cout << "  BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): \"" 
+              << model.generate("the smart ", 15, 0.7f, 0, 1.0f, true) << "\"\n";
 
     // ========================================================================
     // Demo 10: Model Checkpointing (Save & Load Verification)
