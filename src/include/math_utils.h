@@ -194,6 +194,11 @@ std::vector<float> bitlinear_packed_avx2(const std::vector<std::vector<uint8_t>>
                                           float scale);
 
 /**
+ * Check if GPU or parallel hardware acceleration is available and enabled.
+ */
+bool is_gpu_accelerated();
+
+/**
  * Micro-benchmark comparing traditional floating-point GEMM vs. Ternary BitLinear vs. Explicit AVX2 SIMD.
  */
 void benchmark_matmul_vs_bitlinear(int num_rows = 512, int num_cols = 512, int iterations = 100);

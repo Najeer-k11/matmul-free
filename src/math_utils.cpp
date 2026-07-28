@@ -167,12 +167,17 @@ std::vector<float> rmsnorm(const std::vector<float>& x, float eps) {
     if (x.empty()) return {};
     float sum_sq = 0.0f;
     for (float val : x) {
-        sum_sq += val * val;
+        if (!std::isnan(val) && !std::isinf(val)) {
+            sum_sq += val * val;
+        }
     }
     float rms = std::sqrt(sum_sq / static_cast<float>(x.size()) + eps);
+    if (std::isnan(rms) || rms < 1e-8f) rms = 1e-4f;
+    
     std::vector<float> out(x.size());
     for (size_t i = 0; i < x.size(); ++i) {
-        out[i] = x[i] / rms;
+        float val = (std::isnan(x[i]) || std::isinf(x[i])) ? 0.0f : x[i];
+        out[i] = val / rms;
     }
     return out;
 }
@@ -189,17 +194,20 @@ std::vector<std::vector<int8_t>> quantize_weights_ternary(const std::vector<std:
     size_t count = 0;
     for (const auto& row : weight) {
         for (float val : row) {
-            abs_sum += std::abs(val);
-            count++;
+            if (!std::isnan(val) && !std::isinf(val)) {
+                abs_sum += std::abs(val);
+                count++;
+            }
         }
     }
     scale = count > 0 ? static_cast<float>(abs_sum / count) : 1.0f;
-    if (scale < 1e-6f) scale = 1e-6f;
+    if (std::isnan(scale) || std::isinf(scale) || scale < 1e-6f) scale = 1e-6f;
 
     std::vector<std::vector<int8_t>> ternary(weight.size(), std::vector<int8_t>(weight[0].size()));
     for (size_t i = 0; i < weight.size(); ++i) {
         for (size_t j = 0; j < weight[i].size(); ++j) {
-            float val = weight[i][j] / scale;
+            float w_val = (std::isnan(weight[i][j]) || std::isinf(weight[i][j])) ? 0.0f : weight[i][j];
+            float val = w_val / scale;
             if (val >= 0.5f) {
                 ternary[i][j] = 1;
             } else if (val <= -0.5f) {
@@ -279,12 +287,14 @@ std::string detokenize_tokens(const std::vector<int>& tokens) {
 // ============================================================================
 
 int sample_logits(const std::vector<float>& logits, float temperature, int top_k, float top_p) {
-    if (logits.empty()) return 0;
+    if (logits.empty()) return 32; // Default to space if empty
     
     float temp = std::max(temperature, 1e-4f);
-    std::vector<float> scaled_logits(logits.size());
+    std::vector<float> scaled_logits(logits.size(), -1e9f);
     for (size_t i = 0; i < logits.size(); ++i) {
-        scaled_logits[i] = logits[i] / temp;
+        if (!std::isnan(logits[i]) && !std::isinf(logits[i])) {
+            scaled_logits[i] = logits[i] / temp;
+        }
     }
     
     std::vector<float> probs = softmax(scaled_logits);
@@ -595,9 +605,15 @@ void benchmark_matmul_vs_bitlinear(int num_rows, int num_cols, int iterations) {
 }
 
 // ============================================================================
-// Model Configuration
+// GPU / Parallel Acceleration Check
 // ============================================================================
 
-// ModelConfig uses member-initializer defaults; no explicit ctor needed.
+bool is_gpu_accelerated() {
+#if defined(USE_GPU) || defined(__CUDACC__) || defined(_OPENMP) || defined(__NVCC__)
+    return true;
+#else
+    return false;
+#endif
+}
 
 } // namespace matmul_free

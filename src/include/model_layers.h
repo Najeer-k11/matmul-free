@@ -104,6 +104,8 @@ struct FFN {
         for (size_t i = 0; i < weight2.size() && i < output_grad.size(); ++i) {
             for (size_t j = 0; j < weight2[i].size() && j < activated.size(); ++j) {
                 float grad = output_grad[i] * activated[j];
+                if (std::isnan(grad) || std::isinf(grad)) continue;
+                grad = std::max(-1.0f, std::min(1.0f, grad));
                 weight2[i][j] -= lr * grad;
             }
         }
@@ -117,7 +119,8 @@ struct FFN {
             float tv     = std::tanh(inner);
             float sech2  = 1.0f - tv * tv;
             float gelu_deriv = 0.5f * (1.0f + tv) + 0.5f * x_val * sech2 * kSqrt2OverPi * (1.0f + 3.0f * 0.044715f * x_val * x_val);
-            grad_hidden[i] = gelu_deriv * grad_activated[i];
+            float gh = gelu_deriv * grad_activated[i];
+            grad_hidden[i] = (std::isnan(gh) || std::isinf(gh)) ? 0.0f : gh;
         }
 
         // Grad wrt input x: grad_x = grad_hidden @ W1
@@ -129,13 +132,15 @@ struct FFN {
                     sum += weight1[i][j] * grad_hidden[i];
                 }
             }
-            grad_x[j] = sum;
+            grad_x[j] = (std::isnan(sum) || std::isinf(sum)) ? 0.0f : sum;
         }
 
         // Update weight1: dL/dW1[i][j] = grad_hidden[i] * x[j]
         for (size_t i = 0; i < weight1.size() && i < grad_hidden.size(); ++i) {
             for (size_t j = 0; j < weight1[i].size() && j < x.size(); ++j) {
                 float grad = grad_hidden[i] * x[j];
+                if (std::isnan(grad) || std::isinf(grad)) continue;
+                grad = std::max(-1.0f, std::min(1.0f, grad));
                 weight1[i][j] -= lr * grad;
             }
         }
@@ -348,17 +353,20 @@ struct AttentionLayer {
                 const auto& gv = grad_v[i];
                 int inp_sz = static_cast<int>(inp.size());
                 for (int r = 0; r < head_dim; ++r) {
-                    float q_r = gq[r] * lr;
-                    float k_r = gk[r] * lr;
-                    float v_r = gv[r] * lr;
+                    float q_r = std::max(-1.0f, std::min(1.0f, (std::isnan(gq[r]) || std::isinf(gq[r])) ? 0.0f : gq[r])) * lr;
+                    float k_r = std::max(-1.0f, std::min(1.0f, (std::isnan(gk[r]) || std::isinf(gk[r])) ? 0.0f : gk[r])) * lr;
+                    float v_r = std::max(-1.0f, std::min(1.0f, (std::isnan(gv[r]) || std::isinf(gv[r])) ? 0.0f : gv[r])) * lr;
                     auto& qw_row = query_weights[h][r];
                     auto& kw_row = key_weights[h][r];
                     auto& vw_row = value_weights[h][r];
                     for (int c = 0; c < input_dim && c < inp_sz; ++c) {
-                        float in_c = inp[c];
-                        qw_row[c] -= q_r * in_c;
-                        kw_row[c] -= k_r * in_c;
-                        vw_row[c] -= v_r * in_c;
+                        float in_c = (std::isnan(inp[c]) || std::isinf(inp[c])) ? 0.0f : inp[c];
+                        float dq = q_r * in_c;
+                        float dk = k_r * in_c;
+                        float dv = v_r * in_c;
+                        if (!std::isnan(dq) && !std::isinf(dq)) qw_row[c] -= dq;
+                        if (!std::isnan(dk) && !std::isinf(dk)) kw_row[c] -= dk;
+                        if (!std::isnan(dv) && !std::isinf(dv)) vw_row[c] -= dv;
                     }
                 }
             }
@@ -370,14 +378,17 @@ struct AttentionLayer {
                 const auto& gv = grad_v[i];
                 auto& in_g = input_grads[i];
                 for (int r = 0; r < head_dim; ++r) {
-                    float q_r = gq[r];
-                    float k_r = gk[r];
-                    float v_r = gv[r];
+                    float q_r = (std::isnan(gq[r]) || std::isinf(gq[r])) ? 0.0f : std::max(-1.0f, std::min(1.0f, gq[r]));
+                    float k_r = (std::isnan(gk[r]) || std::isinf(gk[r])) ? 0.0f : std::max(-1.0f, std::min(1.0f, gk[r]));
+                    float v_r = (std::isnan(gv[r]) || std::isinf(gv[r])) ? 0.0f : std::max(-1.0f, std::min(1.0f, gv[r]));
                     const auto& qw_row = query_weights[h][r];
                     const auto& kw_row = key_weights[h][r];
                     const auto& vw_row = value_weights[h][r];
                     for (int c = 0; c < input_dim && c < static_cast<int>(qw_row.size()); ++c) {
-                        in_g[c] += qw_row[c] * q_r + kw_row[c] * k_r + vw_row[c] * v_r;
+                        float acc = qw_row[c] * q_r + kw_row[c] * k_r + vw_row[c] * v_r;
+                        if (!std::isnan(acc) && !std::isinf(acc)) {
+                            in_g[c] += acc;
+                        }
                     }
                 }
             }
@@ -710,6 +721,12 @@ public:
     // Training methods
     void train(const std::vector<std::string>& training_data, 
                int epochs = 20, float learning_rate = 0.03f, bool use_qat = false) {
+        if (is_gpu_accelerated()) {
+            std::cout << "  [GPU Acceleration: ENABLED]\n";
+        } else {
+            std::cout << "  [GPU Acceleration: DISABLED (Using CPU)]\n";
+        }
+
         for (int epoch = 0; epoch < epochs; ++epoch) {
             float total_epoch_loss = 0.0f;
             int num_samples = 0;
@@ -770,8 +787,15 @@ public:
                     
                     // Update vocab_projection weights
                     for (int k = 0; k < 256; ++k) {
+                        float dl_k = d_logits[k];
+                        if (std::isnan(dl_k) || std::isinf(dl_k)) continue;
+                        dl_k = std::max(-1.0f, std::min(1.0f, dl_k));
                         for (int d = 0; d < config_.hidden_dim; ++d) {
-                            vocab_projection[k][d] -= learning_rate * d_logits[k] * seq[t][d];
+                            float s_td = (std::isnan(seq[t][d]) || std::isinf(seq[t][d])) ? 0.0f : seq[t][d];
+                            float grad_v = learning_rate * dl_k * s_td;
+                            if (!std::isnan(grad_v) && !std::isinf(grad_v)) {
+                                vocab_projection[k][d] -= std::max(-0.1f, std::min(0.1f, grad_v));
+                            }
                         }
                     }
                 }
@@ -792,18 +816,21 @@ public:
                     int token_idx = tokens[t];
                     if (token_idx >= 0 && token_idx < static_cast<int>(token_embeddings.size())) {
                         for (int d = 0; d < config_.hidden_dim; ++d) {
-                            token_embeddings[token_idx][d] -= learning_rate * curr_grads[t][d];
+                            float cg = curr_grads[t][d];
+                            if (!std::isnan(cg) && !std::isinf(cg)) {
+                                float emb_update = learning_rate * std::max(-1.0f, std::min(1.0f, cg));
+                                token_embeddings[token_idx][d] -= emb_update;
+                            }
                         }
                     }
                 }
             }
 
-            int log_interval = std::max(1, epochs / 10);
-            if ((epoch + 1) % log_interval == 0 || epoch == 0 || epoch == epochs - 1) {
-                float avg_loss = num_samples > 0 ? total_epoch_loss / num_samples : 0.0f;
-                std::cout << "  Epoch " << (epoch + 1 < 10 ? " " : "") << epoch + 1 << "/" << epochs 
-                          << " - Loss: " << std::fixed << std::setprecision(4) << avg_loss << "\n";
-            }
+            float epoch_pct = ((epoch + 1) * 100.0f) / static_cast<float>(epochs);
+            float avg_loss = num_samples > 0 ? total_epoch_loss / num_samples : 0.0f;
+            std::cout << "  [Epoch " << std::setw(3) << (epoch + 1) << "/" << epochs 
+                      << " | " << std::setw(5) << std::fixed << std::setprecision(1) << epoch_pct << "%] "
+                      << "Loss: " << std::setprecision(4) << avg_loss << "\n";
         }
     }
     
@@ -847,18 +874,19 @@ public:
             std::vector<float> last_hidden = seq.back();
             std::vector<float> logits = get_logits(last_hidden);
 
-            // Mask non-printable ASCII range (keep 32..126, EOS 0, and '\n' 10) for clean text generation
-            for (int i = 0; i < 256; ++i) {
-                if ((i < 32 || i > 126) && i != 0 && i != 10) {
+            // Mask non-printable ASCII range (keep printable ASCII 32..126) for clean text generation
+            for (int i = 0; i < static_cast<int>(logits.size()); ++i) {
+                if (i < 32 || i > 126) {
                     logits[i] = -1e9f;
                 }
             }
 
-            // Repetition penalty for recent tokens
-            for (size_t r = (tokens.size() > 4 ? tokens.size() - 4 : 0); r < tokens.size(); ++r) {
+            // Repetition penalty for recent tokens (look back up to 16 tokens)
+            size_t start_r = tokens.size() > 16 ? tokens.size() - 16 : 0;
+            for (size_t r = start_r; r < tokens.size(); ++r) {
                 int prev_tok = tokens[r];
                 if (prev_tok >= 0 && prev_tok < 256) {
-                    logits[prev_tok] -= 1.5f;
+                    logits[prev_tok] -= 3.5f;
                 }
             }
 
