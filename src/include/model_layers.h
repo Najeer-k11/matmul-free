@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 namespace matmul_free {
 
@@ -693,6 +694,28 @@ public:
             }
         }
     }
+
+    /**
+     * Dynamically resize vocabulary for BPE tokenization.
+     */
+    void resize_vocab(int new_vocab_size) {
+        if (new_vocab_size <= 0) return;
+        int old_emb_size = static_cast<int>(token_embeddings.size());
+        token_embeddings.resize(new_vocab_size, std::vector<float>(config_.hidden_dim));
+        for (int i = old_emb_size; i < new_vocab_size; ++i) {
+            for (int j = 0; j < config_.hidden_dim; ++j) {
+                token_embeddings[i][j] = xavier_init(config_.hidden_dim, new_vocab_size);
+            }
+        }
+        
+        int old_proj_size = static_cast<int>(vocab_projection.size());
+        vocab_projection.resize(new_vocab_size, std::vector<float>(config_.hidden_dim));
+        for (int i = old_proj_size; i < new_vocab_size; ++i) {
+            for (int j = 0; j < config_.hidden_dim; ++j) {
+                vocab_projection[i][j] = xavier_init(config_.hidden_dim, new_vocab_size);
+            }
+        }
+    }
     
     /**
      * Compute logits over 256-vocabulary size from hidden vector.
@@ -720,19 +743,43 @@ public:
 
     // Training methods
     void train(const std::vector<std::string>& training_data, 
-               int epochs = 20, float learning_rate = 0.03f, bool use_qat = false) {
+               int epochs = 50, float initial_learning_rate = 0.025f, bool use_qat = false,
+               const BPETokenizer* bpe = nullptr) {
         if (is_gpu_accelerated()) {
             std::cout << "  [GPU Acceleration: ENABLED]\n";
         } else {
             std::cout << "  [GPU Acceleration: DISABLED (Using CPU)]\n";
         }
 
+        // 90% train / 10% validation split
+        size_t val_size = std::max(size_t(1), training_data.size() / 10);
+        size_t train_size = training_data.size() - val_size;
+        std::vector<std::string> train_set(training_data.begin(), training_data.begin() + train_size);
+        std::vector<std::string> val_set(training_data.begin() + train_size, training_data.end());
+
+        float best_val_loss = 1e9f;
+        int best_epoch = 0;
+        auto best_embeddings = token_embeddings;
+        auto best_blocks = transformer_blocks;
+        auto best_vocab = vocab_projection;
+
+        float prev_epoch_loss = 1e9f;
+
         for (int epoch = 0; epoch < epochs; ++epoch) {
-            float total_epoch_loss = 0.0f;
-            int num_samples = 0;
+            // Linear learning rate decay schedule
+            float current_lr = initial_learning_rate * (1.0f - static_cast<float>(epoch) / static_cast<float>(epochs));
+            if (current_lr < 0.0001f) current_lr = 0.0001f;
+
+            float total_train_loss = 0.0f;
+            int train_samples = 0;
             
-            for (const auto& text : training_data) {
-                std::vector<int> tokens = tokenize_text(text, static_cast<int>(token_embeddings.size()));
+            for (const auto& text : train_set) {
+                std::vector<int> tokens;
+                if (bpe != nullptr) {
+                    tokens = bpe->encode(text);
+                } else {
+                    tokens = tokenize_text(text, static_cast<int>(token_embeddings.size()));
+                }
                 if (tokens.size() <= 1) continue;
                 
                 std::vector<std::vector<float>> input_seq(tokens.size());
@@ -745,7 +792,7 @@ public:
                     }
                 }
 
-                // Forward pass through transformer blocks with intermediate layer input tracking
+                // Forward pass through transformer blocks
                 std::vector<std::vector<std::vector<float>>> layer_inputs(transformer_blocks.size());
                 std::vector<std::vector<float>> seq = input_seq;
                 for (size_t b = 0; b < transformer_blocks.size(); ++b) {
@@ -759,40 +806,39 @@ public:
                 
                 // Compute cross-entropy loss
                 float loss = compute_loss(seq, tokens);
-                total_epoch_loss += loss;
-                num_samples++;
+                total_train_loss += loss;
+                train_samples++;
                 
                 // Backpropagation through Vocabulary Projection & Transformer Blocks
                 std::vector<std::vector<float>> hidden_grads(seq.size(), std::vector<float>(config_.hidden_dim, 0.0f));
-                
+                int vocab_sz = static_cast<int>(vocab_projection.size());
+
                 for (size_t t = 0; t + 1 < tokens.size(); ++t) {
                     int target_token = tokens[t + 1];
                     std::vector<float> logits = get_logits(seq[t]);
                     std::vector<float> probs = softmax(logits);
                     
-                    // Cross-entropy gradient w.r.t logits: p - y
                     std::vector<float> d_logits = probs;
-                    if (target_token >= 0 && target_token < 256) {
+                    if (target_token >= 0 && target_token < vocab_sz) {
                         d_logits[target_token] -= 1.0f;
                     }
                     
-                    // d_hidden = d_logits @ vocab_projection
                     for (int d = 0; d < config_.hidden_dim; ++d) {
                         float sum = 0.0f;
-                        for (int k = 0; k < 256; ++k) {
+                        for (int k = 0; k < vocab_sz; ++k) {
                             sum += vocab_projection[k][d] * d_logits[k];
                         }
                         hidden_grads[t][d] = sum;
                     }
                     
-                    // Update vocab_projection weights
-                    for (int k = 0; k < 256; ++k) {
+                    // Update vocab_projection with L2 weight decay
+                    for (int k = 0; k < vocab_sz; ++k) {
                         float dl_k = d_logits[k];
                         if (std::isnan(dl_k) || std::isinf(dl_k)) continue;
                         dl_k = std::max(-1.0f, std::min(1.0f, dl_k));
                         for (int d = 0; d < config_.hidden_dim; ++d) {
                             float s_td = (std::isnan(seq[t][d]) || std::isinf(seq[t][d])) ? 0.0f : seq[t][d];
-                            float grad_v = learning_rate * dl_k * s_td;
+                            float grad_v = current_lr * (dl_k * s_td + 0.0001f * vocab_projection[k][d]);
                             if (!std::isnan(grad_v) && !std::isinf(grad_v)) {
                                 vocab_projection[k][d] -= std::max(-0.1f, std::min(0.1f, grad_v));
                             }
@@ -800,25 +846,24 @@ public:
                     }
                 }
                 
-                // Clip gradients to stabilize convergence
                 clip_grad_norm(hidden_grads, 1.0f);
 
-                // Backprop through transformer blocks in reverse order with gradient chaining
+                // Backprop through transformer blocks
                 std::vector<std::vector<float>> curr_grads = hidden_grads;
                 for (int b = static_cast<int>(transformer_blocks.size()) - 1; b >= 0; --b) {
                     std::vector<std::vector<float>> next_grads;
-                    transformer_blocks[b].backward_and_update(layer_inputs[b], curr_grads, learning_rate, next_grads);
+                    transformer_blocks[b].backward_and_update(layer_inputs[b], curr_grads, current_lr, next_grads);
                     curr_grads = next_grads;
                 }
 
-                // Update token embeddings using chained gradient from layer 0
+                // Update token embeddings with L2 weight decay
                 for (size_t t = 0; t < tokens.size(); ++t) {
                     int token_idx = tokens[t];
                     if (token_idx >= 0 && token_idx < static_cast<int>(token_embeddings.size())) {
                         for (int d = 0; d < config_.hidden_dim; ++d) {
                             float cg = curr_grads[t][d];
                             if (!std::isnan(cg) && !std::isinf(cg)) {
-                                float emb_update = learning_rate * std::max(-1.0f, std::min(1.0f, cg));
+                                float emb_update = current_lr * (std::max(-1.0f, std::min(1.0f, cg)) + 0.0001f * token_embeddings[token_idx][d]);
                                 token_embeddings[token_idx][d] -= emb_update;
                             }
                         }
@@ -826,12 +871,67 @@ public:
                 }
             }
 
+            // Compute Validation Loss
+            float total_val_loss = 0.0f;
+            int val_samples = 0;
+            for (const auto& text : val_set) {
+                std::vector<int> tokens = bpe != nullptr ? bpe->encode(text) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
+                if (tokens.size() <= 1) continue;
+                std::vector<std::vector<float>> input_seq(tokens.size());
+                for (size_t i = 0; i < tokens.size(); ++i) {
+                    int id = tokens[i];
+                    if (id >= 0 && id < static_cast<int>(token_embeddings.size())) {
+                        input_seq[i] = token_embeddings[id];
+                    } else {
+                        input_seq[i].assign(config_.hidden_dim, 0.0f);
+                    }
+                }
+                std::vector<std::vector<float>> seq = input_seq;
+                for (size_t b = 0; b < transformer_blocks.size(); ++b) {
+                    seq = use_qat ? transformer_blocks[b].forward_bitlinear(seq) : transformer_blocks[b].forward(seq);
+                }
+                total_val_loss += compute_loss(seq, tokens);
+                val_samples++;
+            }
+
+            float avg_train_loss = train_samples > 0 ? total_train_loss / train_samples : 0.0f;
+            float avg_val_loss = val_samples > 0 ? total_val_loss / val_samples : avg_train_loss;
             float epoch_pct = ((epoch + 1) * 100.0f) / static_cast<float>(epochs);
-            float avg_loss = num_samples > 0 ? total_epoch_loss / num_samples : 0.0f;
+
+            // Track & Save Best Checkpoint
+            if (avg_val_loss < best_val_loss) {
+                best_val_loss = avg_val_loss;
+                best_epoch = epoch + 1;
+                best_embeddings = token_embeddings;
+                best_blocks = transformer_blocks;
+                best_vocab = vocab_projection;
+            }
+
             std::cout << "  [Epoch " << std::setw(3) << (epoch + 1) << "/" << epochs 
                       << " | " << std::setw(5) << std::fixed << std::setprecision(1) << epoch_pct << "%] "
-                      << "Loss: " << std::setprecision(4) << avg_loss << "\n";
+                      << "Train Loss: " << std::setprecision(4) << avg_train_loss 
+                      << " | Val Loss: " << avg_val_loss << "\n";
+
+            // Live Generation Diagnostic every 10 epochs
+            if ((epoch + 1) % 10 == 0) {
+                std::string sample = generate("the ", 12, 0.5f, 3, 0.85f, use_qat, bpe);
+                std::cout << "     >> Sample Gen [Epoch " << (epoch + 1) << "]: \"" << sample << "\"\n";
+            }
+
+            // Early stopping check if loss improvement < 1e-5
+            if (std::abs(prev_epoch_loss - avg_train_loss) < 1e-5f && epoch > 20) {
+                std::cout << "  >> Loss converged (delta < 1e-5). Stopping early at epoch " << (epoch + 1) << ".\n";
+                break;
+            }
+            prev_epoch_loss = avg_train_loss;
         }
+
+        // Restore best model checkpoint
+        token_embeddings = best_embeddings;
+        transformer_blocks = best_blocks;
+        vocab_projection = best_vocab;
+        std::cout << "  >> Restored best model checkpoint from Epoch " << best_epoch 
+                  << " (Val Loss: " << std::setprecision(4) << best_val_loss << ")!\n";
     }
     
     /**
@@ -841,8 +941,13 @@ public:
      */
     std::string generate(const std::string& input_text, int max_length = 20,
                          float temperature = 1.0f, int top_k = 0, float top_p = 1.0f,
-                         bool use_bitlinear = false) {
-        std::vector<int> tokens = tokenize_text(input_text, static_cast<int>(token_embeddings.size()));
+                         bool use_bitlinear = false, const BPETokenizer* bpe = nullptr) {
+        std::vector<int> tokens;
+        if (bpe != nullptr) {
+            tokens = bpe->encode(input_text);
+        } else {
+            tokens = tokenize_text(input_text, static_cast<int>(token_embeddings.size()));
+        }
         if (tokens.empty()) return input_text;
 
         for (int step = 0; step < max_length; ++step) {
@@ -858,56 +963,66 @@ public:
                 }
             }
 
-            // Forward pass through transformer blocks
             std::vector<std::vector<float>> seq = input_seq;
             for (auto& block : transformer_blocks) {
-                if (use_bitlinear) {
-                    seq = block.forward_bitlinear(seq);
-                } else {
-                    seq = block.forward(seq);
-                }
+                seq = use_bitlinear ? block.forward_bitlinear(seq) : block.forward(seq);
             }
 
             if (seq.empty()) break;
 
-            // Extract last token hidden state and compute vocabulary logits
             std::vector<float> last_hidden = seq.back();
             std::vector<float> logits = get_logits(last_hidden);
+            int vocab_sz = static_cast<int>(logits.size());
 
-            // Mask non-printable ASCII range (keep printable ASCII 32..126) for clean text generation
-            for (int i = 0; i < static_cast<int>(logits.size()); ++i) {
-                if (i < 32 || i > 126) {
+            // Mask invalid tokens outside vocabulary
+            for (int i = 0; i < vocab_sz; ++i) {
+                if (bpe == nullptr && (i < 32 || i > 126)) {
                     logits[i] = -1e9f;
                 }
             }
 
-            // Repetition penalty for recent tokens (look back up to 16 tokens)
+            // Hard rule: candidate exclusion if same token appeared 3+ times consecutively
+            int last_tok = -1;
+            int streak = 0;
+            for (int t : tokens) {
+                if (t == last_tok) streak++;
+                else { last_tok = t; streak = 1; }
+            }
+            if (streak >= 3 && last_tok >= 0 && last_tok < vocab_sz) {
+                logits[last_tok] = -1e9f; // Hard exclude candidate!
+            }
+
+            // Repetition penalty once per distinct token in last 16 tokens (excluding space & pad)
+            std::unordered_set<int> distinct_tokens;
             size_t start_r = tokens.size() > 16 ? tokens.size() - 16 : 0;
             for (size_t r = start_r; r < tokens.size(); ++r) {
-                int prev_tok = tokens[r];
-                if (prev_tok >= 0 && prev_tok < 256) {
-                    logits[prev_tok] -= 3.5f;
+                distinct_tokens.insert(tokens[r]);
+            }
+            for (int tok : distinct_tokens) {
+                if (tok >= 0 && tok < vocab_sz) {
+                    if (tok != 32 && tok != ' ' && tok != 1) {
+                        logits[tok] -= 3.0f;
+                    }
                 }
             }
 
             int next_token = 0;
             if (temperature <= 0.01f) {
-                // Greedy selection
                 next_token = static_cast<int>(std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
             } else {
                 next_token = sample_logits(logits, temperature, top_k, top_p);
             }
 
-            // Append predicted token
             tokens.push_back(next_token);
 
-            // Stop condition
-            if (next_token == 0 || next_token == '\n') {
-                break;
-            }
+            if (next_token == 0 || next_token == '\n') break;
         }
-        
-        return detokenize_tokens(tokens);
+
+        if (bpe != nullptr) {
+            return bpe->decode(tokens);
+        } else {
+            return detokenize_tokens(tokens);
+        }
     }
 
     /**

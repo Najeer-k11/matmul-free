@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <immintrin.h>
+#include <unordered_map>
+#include <sstream>
 
 namespace matmul_free {
 
@@ -226,6 +228,7 @@ std::vector<float> bitlinear_vector(const std::vector<std::vector<int8_t>>& weig
     size_t rows = weight_ternary.size();
     std::vector<float> output(rows, 0.0f);
 
+    #pragma omp parallel for if(rows > 32)
     for (size_t i = 0; i < rows; ++i) {
         float acc = 0.0f;
         const auto& w_row = weight_ternary[i];
@@ -363,6 +366,33 @@ BPETokenizer::BPETokenizer() {
     }
 }
 
+void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpus) {
+    std::unordered_map<std::string, int> word_counts;
+    for (const auto& line : corpus) {
+        std::stringstream ss(line);
+        std::string word;
+        while (ss >> word) {
+            word_counts[word]++;
+            word_counts[" " + word]++;
+        }
+    }
+    
+    // Sort words by frequency
+    std::vector<std::pair<int, std::string>> freq_words;
+    for (const auto& kv : word_counts) {
+        if (kv.first.length() >= 2) {
+            freq_words.push_back({kv.second, kv.first});
+        }
+    }
+    std::sort(freq_words.rbegin(), freq_words.rend());
+    
+    for (const auto& item : freq_words) {
+        if (std::find(vocab_.begin(), vocab_.end(), item.second) == vocab_.end()) {
+            vocab_.push_back(item.second);
+        }
+    }
+}
+
 std::vector<int> BPETokenizer::encode(const std::string& text) const {
     std::vector<int> tokens;
     size_t pos = 0;
@@ -449,6 +479,7 @@ std::vector<float> bitlinear_packed_simd(const std::vector<std::vector<uint8_t>>
 
     static const float kLut[4] = {0.0f, 1.0f, -1.0f, 0.0f};
 
+    #pragma omp parallel for if(rows > 32)
     for (size_t i = 0; i < rows; ++i) {
         float acc = 0.0f;
         const uint8_t* p_row = packed_weight[i].data();
@@ -488,6 +519,7 @@ std::vector<float> bitlinear_packed_avx2(const std::vector<std::vector<uint8_t>>
 
     static const float kLut[4] = {0.0f, 1.0f, -1.0f, 0.0f};
 
+    #pragma omp parallel for if(rows > 32)
     for (size_t i = 0; i < rows; ++i) {
         float acc = 0.0f;
         const uint8_t* p_row = packed_weight[i].data();

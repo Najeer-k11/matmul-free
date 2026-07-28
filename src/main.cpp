@@ -234,9 +234,14 @@ int main() {
         };
     }
     
+    BPETokenizer bpe;
+    bpe.build_vocab_from_corpus(corpus);
+    model.resize_vocab(bpe.vocab_size());
+
     std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
-    std::cout << "Starting active training over 50 epochs with learning rate (0.025f)...\n";
-    model.train(corpus, 50, 0.025f);
+    std::cout << "BPE Vocabulary size: " << bpe.vocab_size() << " subwords / tokens\n";
+    std::cout << "Starting active training over 80 epochs with linear LR decay (0.025f -> 0.0001f)...\n";
+    model.train(corpus, 80, 0.025f, false, &bpe);
     std::cout << "Training complete!\n";
     
     // ========================================================================
@@ -271,8 +276,8 @@ int main() {
         }
         std::cout << "\nMultiplication-free BitLinear execution completed successfully!\n";
 
-        std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 20 epochs with STE...\n";
-        model.train(corpus, 20, 0.001f, true);
+        std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 30 epochs with STE & Best Checkpoint Restoration...\n";
+        model.train(corpus, 30, 0.002f, true, &bpe);
         std::cout << "QAT Fine-tuning complete!\n";
     }
     
@@ -281,7 +286,6 @@ int main() {
     // ========================================================================
     std::cout << "\n--- Demo 9: Sampling Strategies & BPE Tokenization ---\n";
     
-    BPETokenizer bpe;
     std::string bpe_input = "matmul free language model deep learning";
     auto bpe_tokens = bpe.encode(bpe_input);
     
@@ -292,12 +296,12 @@ int main() {
     std::cout << "\n  Decoded Text: \"" << bpe.decode(bpe_tokens) << "\"\n\n";
 
     std::cout << "Autoregressive Sampling Generation Options:\n";
-    std::cout << "  Greedy (Prompt: 'once upon a '): \"" << model.generate("once upon a ", 25, 0.0f) << "\"\n";
-    std::cout << "  Temp=0.5 (Prompt: 'the smart '): \"" << model.generate("the smart ", 25, 0.5f, 3) << "\"\n";
-    std::cout << "  Top-K=3  (Prompt: 'the little'): \"" << model.generate("the little ", 25, 0.6f, 3) << "\"\n";
-    std::cout << "  Top-P=0.85(Prompt: 'a friendly'): \"" << model.generate("a friendly ", 25, 0.6f, 0, 0.85f) << "\"\n";
+    std::cout << "  Greedy (Prompt: 'once upon a '): \"" << model.generate("once upon a ", 25, 0.0f, 0, 1.0f, false, &bpe) << "\"\n";
+    std::cout << "  Temp=0.5 (Prompt: 'the smart '): \"" << model.generate("the smart ", 25, 0.5f, 3, 1.0f, false, &bpe) << "\"\n";
+    std::cout << "  Top-K=3  (Prompt: 'the little'): \"" << model.generate("the little ", 25, 0.6f, 3, 1.0f, false, &bpe) << "\"\n";
+    std::cout << "  Top-P=0.85(Prompt: 'a friendly'): \"" << model.generate("a friendly ", 25, 0.6f, 0, 0.85f, false, &bpe) << "\"\n";
     std::cout << "  BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): \"" 
-              << model.generate("the smart ", 25, 0.5f, 3, 1.0f, true) << "\"\n";
+              << model.generate("the smart ", 25, 0.5f, 3, 1.0f, true, &bpe) << "\"\n";
 
     // ========================================================================
     // Demo 10: Model Checkpointing (Save & Load Verification)
