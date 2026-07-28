@@ -120,6 +120,11 @@ float swiglu(const std::vector<float>& x);
 std::vector<float> rmsnorm(const std::vector<float>& x, float eps = 1e-5f);
 
 /**
+ * Root Mean Square Normalization Backward Pass (gradient flow).
+ */
+std::vector<float> rmsnorm_backward(const std::vector<float>& x, const std::vector<float>& grad_y, float eps = 1e-5f);
+
+/**
  * Quantize floating point weight matrix into 1.58-bit ternary matrix {-1, 0, +1}.
  * Returns scale factor gamma via reference parameter.
  */

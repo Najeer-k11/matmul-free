@@ -185,6 +185,41 @@ std::vector<float> rmsnorm(const std::vector<float>& x, float eps) {
     return out;
 }
 
+std::vector<float> rmsnorm_backward(const std::vector<float>& x, const std::vector<float>& grad_y, float eps) {
+    if (x.empty()) return {};
+    size_t N = x.size();
+    
+    float sum_sq = 0.0f;
+    for (float val : x) {
+        if (!std::isnan(val) && !std::isinf(val)) {
+            sum_sq += val * val;
+        }
+    }
+    float rms = std::sqrt(sum_sq / static_cast<float>(N) + eps);
+    if (std::isnan(rms) || rms < 1e-8f) rms = 1e-4f;
+    float inv_rms = 1.0f / rms;
+
+    float sum_gy_y = 0.0f;
+    for (size_t i = 0; i < N; ++i) {
+        float y_i = ((std::isnan(x[i]) || std::isinf(x[i])) ? 0.0f : x[i]) * inv_rms;
+        float gy_i = (i < grad_y.size()) ? grad_y[i] : 0.0f;
+        if (!std::isnan(gy_i) && !std::isinf(gy_i)) {
+            sum_gy_y += gy_i * y_i;
+        }
+    }
+    float mean_gy_y = sum_gy_y / static_cast<float>(N);
+
+    std::vector<float> grad_x(N);
+    for (size_t k = 0; k < N; ++k) {
+        float y_k = ((std::isnan(x[k]) || std::isinf(x[k])) ? 0.0f : x[k]) * inv_rms;
+        float gy_k = (k < grad_y.size()) ? grad_y[k] : 0.0f;
+        if (std::isnan(gy_k) || std::isinf(gy_k)) gy_k = 0.0f;
+        grad_x[k] = inv_rms * (gy_k - y_k * mean_gy_y);
+    }
+
+    return grad_x;
+}
+
 std::vector<std::vector<int8_t>> quantize_weights_ternary(const std::vector<std::vector<float>>& weight,
                                                             float& scale) {
     if (weight.empty() || weight[0].empty()) {

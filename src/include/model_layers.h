@@ -504,18 +504,24 @@ struct TransformerBlock {
             std::vector<float> norm_res = rmsnorm(after_residual[i]);
             std::vector<float> ffn_grad_in;
             ffn.backward_and_update(norm_res, output_grads[i], lr, ffn_grad_in);
+            
+            // Route gradient through RMSNorm backward pass!
+            std::vector<float> ffn_grad_presub = rmsnorm_backward(after_residual[i], ffn_grad_in);
+
             for (int d = 0; d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
-                grad_after_residual[i][d] = output_grads[i][d] + (d < static_cast<int>(ffn_grad_in.size()) ? ffn_grad_in[d] : 0.0f);
+                grad_after_residual[i][d] = output_grads[i][d] + (d < static_cast<int>(ffn_grad_presub.size()) ? ffn_grad_presub[d] : 0.0f);
             }
         }
 
         std::vector<std::vector<float>> attn_grad_in;
         attention.backward_and_update(norm_inputs, grad_after_residual, lr, attn_grad_in);
 
+        // Route gradient through RMSNorm backward pass per token!
         input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
         for (size_t i = 0; i < num_tokens; ++i) {
+            std::vector<float> attn_grad_presub = rmsnorm_backward(inputs[i], attn_grad_in[i]);
             for (int d = 0; d < input_dim; ++d) {
-                input_grads[i][d] = grad_after_residual[i][d] + (d < static_cast<int>(attn_grad_in[i].size()) ? attn_grad_in[i][d] : 0.0f);
+                input_grads[i][d] = grad_after_residual[i][d] + (d < static_cast<int>(attn_grad_presub.size()) ? attn_grad_presub[d] : 0.0f);
             }
         }
     }
@@ -615,6 +621,9 @@ class LanguageModel {
 public:
     std::vector<std::vector<float>> token_embeddings;   // Token embeddings
     std::vector<TransformerBlock>   transformer_blocks; // Transformer encoder blocks
+    LSTMCell                        output_lstm;        // Output recurrent layer
+    std::vector<std::vector<float>> vocab_projection;   // Linear output layer
+    ModelConfig                     config_;
 
     LanguageModel(const ModelConfig& config) : config_(config) {
         // Initialize token embeddings (Xavier initialization)
@@ -764,13 +773,14 @@ public:
         std::vector<std::string> train_set(training_data.begin(), training_data.begin() + train_size);
         std::vector<std::string> val_set(training_data.begin() + train_size, training_data.end());
 
-        float best_val_loss = 1e9f;
+        float best_train_loss = 1e9f;
         int best_epoch = 0;
         auto best_embeddings = token_embeddings;
         auto best_blocks = transformer_blocks;
         auto best_vocab = vocab_projection;
 
         float prev_epoch_loss = 1e9f;
+        int worsening_streak = 0;
 
         for (int epoch = 0; epoch < epochs; ++epoch) {
             // Linear learning rate decay schedule
@@ -912,9 +922,9 @@ public:
             float avg_val_loss = val_samples > 0 ? total_val_loss / val_samples : avg_train_loss;
             float epoch_pct = ((epoch + 1) * 100.0f) / static_cast<float>(epochs);
 
-            // Track & Save Best Checkpoint
-            if (avg_val_loss < best_val_loss) {
-                best_val_loss = avg_val_loss;
+            // Track & Save Best Checkpoint by lowest Train Loss
+            if (avg_train_loss < best_train_loss) {
+                best_train_loss = avg_train_loss;
                 best_epoch = epoch + 1;
                 best_embeddings = token_embeddings;
                 best_blocks = transformer_blocks;
@@ -932,6 +942,19 @@ public:
                 std::cout << "     >> Sample Gen [Epoch " << (epoch + 1) << "]: \"" << sample << "\"\n";
             }
 
+            // Extended Abort Criterion: loss > 15.0 or 4 consecutive worsening epochs
+            if (avg_train_loss > prev_epoch_loss && epoch > 5) {
+                worsening_streak++;
+            } else {
+                worsening_streak = 0;
+            }
+
+            if (avg_train_loss > 15.0f || worsening_streak >= 4) {
+                std::cout << "  [WARNING] Loss explosion/flatline detected (Train Loss: " << avg_train_loss 
+                          << ") at Epoch " << (epoch + 1) << "! Aborting and restoring best checkpoint.\n";
+                break;
+            }
+
             // Early stopping check if loss improvement < 1e-5
             if (std::abs(prev_epoch_loss - avg_train_loss) < 1e-5f && epoch > 20) {
                 std::cout << "  >> Loss converged (delta < 1e-5). Stopping early at epoch " << (epoch + 1) << ".\n";
@@ -940,12 +963,12 @@ public:
             prev_epoch_loss = avg_train_loss;
         }
 
-        // Restore best model checkpoint
+        // Restore best model checkpoint by train loss
         token_embeddings = best_embeddings;
         transformer_blocks = best_blocks;
         vocab_projection = best_vocab;
         std::cout << "  >> Restored best model checkpoint from Epoch " << best_epoch 
-                  << " (Val Loss: " << std::setprecision(4) << best_val_loss << ")!\n";
+                  << " (Train Loss: " << std::setprecision(4) << best_train_loss << ")!\n";
     }
     
     /**
@@ -1135,12 +1158,6 @@ public:
         return true;
     }
 
-private:
-    ModelConfig config_;
-    LSTMCell    output_lstm;   // Output projection LSTM
-    std::vector<std::vector<float>> vocab_projection; // Vocabulary projection matrix [256 x hidden_dim]
-
-    
     /**
      * Decode vector sequence back to text.
      */

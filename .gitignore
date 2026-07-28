@@ -1,3 +1,24 @@
+# IDE & Editors
 .vscode/
+.idea/
+*.swp
+*.swo
+
+# Build directories & outputs
 build/
+bin/
+out/
+.cpps/
+
+# Compiled Executables & Objects
+*.exe
+*.o
+*.obj
+*.out
+*.dll
+*.so
+*.dylib
+
+# Model Checkpoints & Artifacts
+*.bin
 model_checkpoint.bin
