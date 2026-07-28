@@ -202,33 +202,47 @@ int main() {
     // ========================================================================
     std::cout << "\n--- Demo 7: Model Training & Backpropagation ---\n";
     
-    std::vector<std::string> corpus = {
-        "once upon a time a smart fox lived in the green forest",
-        "the fox liked to run and play near the big tree",
-        "the little dragon liked to read books every evening",
-        "the dragon read a book about a brave smart fox in the forest",
-        "a friendly robot helped children learn science and mathematics",
-        "the robot said hello to the smart fox and the little dragon",
-        "matmul free language models perform fast inference without matrix multiplication",
-        "deep neural networks run efficiently using ternary quantization",
-        "the smart fox found a good book near the river in the forest",
-        "children loved reading stories about the dragon and the fox",
-        "the robot and the fox read books together in the forest",
-        "learning language models is fun for the smart robot and children",
-        "the brave dragon protected the forest and all the animals",
-        "every evening the fox and the dragon read new books",
-        "matmul free LLM generates text fast without floating point matrix multiplication"
-    };
+    std::vector<std::string> corpus;
+    std::ifstream corpus_file("corpus.txt");
+    if (corpus_file.is_open()) {
+        std::string line;
+        while (std::getline(corpus_file, line)) {
+            if (!line.empty()) {
+                corpus.push_back(line);
+            }
+        }
+        corpus_file.close();
+    }
     
-    std::cout << "Training corpus size: " << corpus.size() << " sentences\n";
-    std::cout << "Starting active training over 40 epochs with tuned learning rate (0.020f)...\n";
-    model.train(corpus, 40, 0.020f);
+    if (corpus.empty()) {
+        corpus = {
+            "once upon a time a smart fox lived in the green forest",
+            "the fox liked to run and play near the big tree",
+            "the little dragon liked to read books every evening",
+            "the dragon read a book about a brave smart fox in the forest",
+            "a friendly robot helped children learn science and mathematics",
+            "the robot said hello to the smart fox and the little dragon",
+            "matmul free language models perform fast inference without matrix multiplication",
+            "deep neural networks run efficiently using ternary quantization",
+            "the smart fox found a good book near the river in the forest",
+            "children loved reading stories about the dragon and the fox",
+            "the robot and the fox read books together in the forest",
+            "learning language models is fun for the smart robot and children",
+            "the brave dragon protected the forest and all the animals",
+            "every evening the fox and the dragon read new books",
+            "matmul free LLM generates text fast without floating point matrix multiplication"
+        };
+    }
+    
+    std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
+    std::cout << "Starting active training over 30 epochs with learning rate (0.020f)...\n";
+    model.train(corpus, 30, 0.020f);
     std::cout << "Training complete!\n";
     
     // ========================================================================
-    // Demo 8: BitLinear 1.58-bit Ternary Quantization & RMSNorm
+    // Demo 8: BitLinear 1.58-bit Ternary Quantization & RMSNorm (QAT with STE)
     // ========================================================================
-    std::cout << "\n--- Demo 8: BitLinear 1.58-bit Ternary Quantization ---\n";
+    std::cout << "\n--- Demo 8: BitLinear 1.58-bit Ternary Quantization (QAT with STE) ---\n";
     
     if (!model.transformer_blocks.empty()) {
         const auto& ffn = model.transformer_blocks[0].ffn;
@@ -256,6 +270,10 @@ int main() {
             std::cout << std::fixed << std::setprecision(4) << bitlinear_output[i] << " ";
         }
         std::cout << "\nMultiplication-free BitLinear execution completed successfully!\n";
+
+        std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 20 epochs with STE...\n";
+        model.train(corpus, 20, 0.015f, true);
+        std::cout << "QAT Fine-tuning complete!\n";
     }
     
     // ========================================================================

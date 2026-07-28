@@ -709,7 +709,7 @@ public:
 
     // Training methods
     void train(const std::vector<std::string>& training_data, 
-               int epochs = 20, float learning_rate = 0.03f) {
+               int epochs = 20, float learning_rate = 0.03f, bool use_qat = false) {
         for (int epoch = 0; epoch < epochs; ++epoch) {
             float total_epoch_loss = 0.0f;
             int num_samples = 0;
@@ -733,7 +733,11 @@ public:
                 std::vector<std::vector<float>> seq = input_seq;
                 for (size_t b = 0; b < transformer_blocks.size(); ++b) {
                     layer_inputs[b] = seq;
-                    seq = transformer_blocks[b].forward(seq);
+                    if (use_qat) {
+                        seq = transformer_blocks[b].forward_bitlinear(seq);
+                    } else {
+                        seq = transformer_blocks[b].forward(seq);
+                    }
                 }
                 
                 // Compute cross-entropy loss

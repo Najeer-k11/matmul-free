@@ -1,0 +1,208 @@
+once upon a time a smart fox lived in the green forest
+the fox liked to run and play near the big tree
+the little dragon liked to read books every evening
+the dragon read a book about a brave smart fox in the forest
+a friendly robot helped children learn science and mathematics
+the robot said hello to the smart fox and the little dragon
+matmul free language models perform fast inference without matrix multiplication
+deep neural networks run efficiently using ternary quantization
+the smart fox found a good book near the river in the forest
+children loved reading stories about the dragon and the fox
+the robot and the fox read books together in the forest
+learning language models is fun for the smart robot and children
+the brave dragon protected the forest and all the animals
+every evening the fox and the dragon read new books
+matmul free LLM generates text fast without floating point matrix multiplication
+the sun rose bright over the rolling hills of the ancient valley
+the smart fox trotted softly through the morning dew
+in the heart of the forest stood a grand wooden library
+the library contained thousands of old maps and scientific manuscripts
+the little dragon carefully turned the yellowed pages of a heavy book
+the dragon loved learning about how signals travel through neural networks
+the friendly robot brought fresh tea and fruit to its friends
+together they sat near the window watching the butterflies dance
+the smart fox asked how computers can generate words so quickly
+the robot explained that matmul free architectures eliminate heavy calculations
+instead of multiplying large floating point matrices they use dot products
+ternary quantization compresses weights into negative one zero and positive one
+this allows the model to process long sequences with minimal memory
+the dragon smiled as it understood the magic behind the numbers
+every day brought new discoveries and exciting adventures in the forest
+the river flowed gently past the tall green oak trees
+a family of birds sang sweet melodies high up in the branches
+the fox found a glowing crystal hidden under a pile of autumn leaves
+the crystal shimmered with vibrant colors whenever someone asked a question
+the dragon realized the crystal stored knowledge just like a trained model
+the robot used its sensors to analyze the crystal structure
+it found that information was encoded in simple compact patterns
+the children from the nearby village came to visit every afternoon
+they gathered around the big oak tree to hear stories from the fox
+the fox told tales of ancient heroes who built giant thinking machines
+the dragon demonstrated how fire could illuminate dark mountain paths
+the robot showed the children how arithmetic powers modern technology
+the children asked if a robot could write its own adventure stories
+the robot replied that with self attention and causal masks models learn language
+each token looks back at preceding words to predict what comes next
+the fox nodded happily as it learned about autoregressive sampling
+temperature scaling allows the model to explore creative word choices
+top k and top p sampling filter out improbable predictions for smooth text
+the dragon agreed that intelligent sampling makes generated text natural
+as dusk fell the stars began to twinkle in the clear night sky
+the three friends sat near a warm campfire near the library porch
+they shared memories of all the wonderful lessons they learned that day
+the smart fox fell asleep under the giant oak tree dreaming of algorithms
+the little dragon curled up near the fire keeping everyone warm
+the friendly robot monitored the night sky watching satellite orbits
+morning arrived with a cool breeze whispering through the pine needles
+the smart fox stretched its legs and bounded down the winding path
+the dragon flew gracefully above the canopy surveying the wide valley
+the robot maintained the central database storing all daily observations
+deep in the forest there was a hidden cave where old scholars studied math
+the walls of the cave were covered in detailed mathematical diagrams
+the diagrams showed how rotary position embeddings preserve sequence order
+by rotating query and key vectors positions are naturally encoded
+the dragon studied the rotation formulas with great fascination
+the fox realized that position embeddings enable long context understanding
+the robot calculated the dot products efficiently in parallel loops
+together they compiled a comprehensive catalog of model architectures
+the children returned with notebook computers to test their own code
+they wrote simple C++ programs to simulate neural sequence processing
+the smart fox helped them debug syntax errors in their loop logic
+the dragon showed them how gradient descent optimizes model parameters
+the robot explained how backpropagation distributes error signals backward
+each block receives gradients from the output layer down to embeddings
+the children cheered as their models began predicting readable sentences
+the forest laboratory became a famous center of learning and discovery
+scholars from distant lands traveled across mountains to see the engine
+they marvel reserved for how ternary weights could run on simple hardware
+the smart fox guided guests through the library and demonstrated live text generation
+the dragon gave inspiring speeches about the future of open science
+the friendly robot provided clear explanations of dot product linear layers
+every evening ended with a celebration of knowledge and friendship
+the animals of the forest lived in harmony with technology and nature
+the river continued to flow carrying stories across the vast lands
+the smart fox promised to explore new frontiers in machine learning
+the little dragon promised to protect the library and its precious books
+the friendly robot promised to help everyone learn and create new ideas
+the sun set slowly painting the sky in beautiful shades of gold and purple
+the forest rested peacefully ready for another day of learning and growth
+the smart fox was very wise and loved to solve complex puzzles
+it spent hours pondering how matrix operations could be simplified
+the little dragon had scales that sparkled like emeralds in the sunlight
+it enjoyed writing long poetry about the beauty of mathematics
+the friendly robot had a shining metallic shell and a warm bright light
+it always helped the fox and the dragon organize their research notes
+one day a mysterious parchment was discovered in the old library cellar
+the parchment contained equations describing multiplication free neural networks
+the fox read the symbols carefully and realized their immense potential
+the dragon suggested building a physical prototype in their workshop
+the robot prepared the tools and began assembling the calculation units
+they worked tirelessly through the night under the light of glowing lanterns
+by morning the first matmul free processing cell was fully operational
+it processed data at incredible speeds while consuming minimal power
+the fox tested the system with sample sentences from their favorite books
+the output was clear coherent and generated in the blink of an eye
+the dragon blew a small puff of smoke in celebration of their success
+the robot logged the performance metrics showing substantial memory savings
+news of their achievement spread rapidly across the entire kingdom
+scholars and inventors traveled from afar to witness the breakthrough
+they were amazed by how ternary logic simplified complex matrix operations
+the smart fox hosted workshops teaching visitors how backprop works
+the little dragon explained the role of rotary embeddings in attention
+the friendly robot demonstrated top k and top p sampling techniques
+together they inspired a new generation of researchers and engineers
+the forest laboratory grew into a thriving institute of artificial intelligence
+students learned how to train custom models on modest computing hardware
+they experimented with different activation functions like gelu and swiglu
+they learned how root mean square normalization keeps activations stable
+the smart fox served as the principal mentor guiding student projects
+the little dragon organized annual conferences on efficient computing
+the friendly robot managed the high speed data storage system
+years passed and the forest remained a beacon of innovation and peace
+the smart fox grew even wiser sharing knowledge with all who asked
+the little dragon continued to write beautiful math poetry for the library
+the friendly robot kept the systems running smoothly day and night
+and so the story of the matmul free LLM inspired people everywhere
+proving that with creativity and determination great progress is possible
+the green forest stood strong preserving the harmony of nature and science
+the river flowed onward carrying the legacy of the fox dragon and robot
+every morning brought fresh curiosity and new opportunities to explore
+every evening brought peaceful rest under the starry night sky
+the smart fox smiled knowing that knowledge is a journey without end
+the little dragon closed its book looking forward to tomorrow adventure
+the friendly robot powered down into standby mode ready for the morning
+the end of one chapter was simply the beginning of the next great discovery
+the bright morning sun cast long golden shadows across the meadow
+the fox ran through the tall grass chasing playful summer breezes
+the dragon soared high into the cloudless blue sky feeling completely free
+the robot calibrated its internal sensors for a full day of research
+a small brook trickled past the rocks making a soothing rhythmic sound
+wildflowers bloomed in vibrant shades of red yellow blue and violet
+the fox collected colorful blossoms to decorate the library entrance
+the dragon gathered dry firewood to prepare for the chilly mountain night
+the robot organized the archive files into neatly categorized directories
+a group of young foxes arrived at the library eager to learn reading
+the smart fox welcomed them with a warm smile and opened a storybook
+the children listened attentively as the fox read tales of old kingdoms
+the dragon joined in demonstrating how imagination brings words to life
+the robot projected glowing holographic diagrams of sentence structures
+the young students learned how words connect to form meaningful ideas
+they practiced writing short sentences about their own daily adventures
+the smart fox encouraged each student praising their creative efforts
+the dragon showed them how practice makes every skill easier over time
+the robot recorded their progress tracking improvements with precision
+at noon everyone gathered under the shade of a great oak tree for lunch
+they shared fresh apples wild berries and homemade honey bread
+the conversation turned to the mysteries of deep learning and intelligence
+the fox explained how memory allows models to maintain context over time
+the dragon described how attention focuses on key details in large texts
+the robot illustrated how residual connections allow deep gradients to flow
+the students were captivated by the seamless blend of nature and logic
+after lunch they conducted an experiment with vector representations
+each word was assigned a unique high dimensional embedding position
+similar words were placed close together in the vector space
+the fox demonstrated how semantic relationships emerge naturally
+the dragon showed that vector addition could capture word analogies
+the robot computed cosine similarities to measure semantic distance
+the students were thrilled to see mathematical concepts come to life
+as the afternoon faded the sky turned a soft shade of orange and pink
+the young visitors thanked their hosts and started their journey home
+the fox waved goodbye promising more exciting lessons the next day
+the dragon flew a short distance alongside them to ensure safe travel
+the robot cleaned up the workshop preparing for evening maintenance
+night fell quietly over the peaceful forest bringing a cool gentle breeze
+the three friends gathered on the porch reflecting on another great day
+the smart fox noted how teaching others deepened their own understanding
+the dragon agreed that sharing knowledge strengthens the whole community
+the robot saved the day log summarizing key achievements and milestones
+the stars shone brightly forming brilliant constellations overhead
+the fox settled into a cozy bed of soft moss dreaming of new ideas
+the dragon rested near the warm hearth feeling content and satisfied
+the robot entered low power mode maintaining vigilance through the night
+the valley slept peacefully under the watchful care of the three friends
+another wonderful day had come to an end in the magical green forest
+the dawn broke quietly as the morning mist hovered over the river
+the smart fox woke up energized and ready for new challenges ahead
+the little dragon stretched its wings in the fresh morning air
+the friendly robot initiated startup routines with optimal efficiency
+together they prepared to explore even deeper frontiers of technology
+they planned to construct a new high capacity model configuration
+with broader hidden dimensions and multiple self attention heads
+the fox drafted the system architecture on a large chalkboard
+the dragon verified the memory requirements for bitlinear quantization
+the robot optimized the gradient propagation loops for speed
+every step was executed with precision care and mathematical rigor
+the project advanced rapidly as each friend contributed their strengths
+by midday the new model stack was assembled and ready for evaluation
+the smart fox initiated the first training cycle with high expectations
+the loss curve dropped smoothly demonstrating stability and precision
+the little dragon monitored activation norms across all sub layers
+the friendly robot recorded execution timing verifying zero matmul overhead
+the test results exceeded all expectations validating their design
+the smart fox celebrated another landmark achievement in their journey
+the dragon wrote a celebratory poem in the library journal
+the robot updated the benchmark report highlighting key performance gains
+and so the smart fox dragon and robot continued their noble mission
+pushing the boundaries of what multiplication free models could achieve
+in the heart of the forest science and nature flourished together
+bringing light knowledge and inspiration to all who entered their world
