@@ -6,7 +6,7 @@
 namespace matmul_free {
 
 BPETokenizer::BPETokenizer() {
-    vocab_ = {"<unk>", "<pad>"};
+    vocab_ = {"<unk>", "<pad>", "<eos>"};
     for (int i = 32; i < 128; ++i) {
         vocab_.push_back(std::string(1, static_cast<char>(i)));
     }
@@ -16,7 +16,7 @@ BPETokenizer::BPETokenizer() {
 }
 
 void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpus, int target_vocab_size) {
-    vocab_ = {"<unk>", "<pad>"};
+    vocab_ = {"<unk>", "<pad>", "<eos>"};
     vocab_map_.clear();
     merges_.clear();
     
@@ -88,7 +88,7 @@ void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpu
     }
 }
 
-std::vector<int> BPETokenizer::encode(const std::string& text) const {
+std::vector<int> BPETokenizer::encode(const std::string& text, bool add_eos) const {
     std::vector<std::string> symbols;
     for (char c : text) {
         unsigned char uc = static_cast<unsigned char>(c);
@@ -97,7 +97,10 @@ std::vector<int> BPETokenizer::encode(const std::string& text) const {
         }
     }
 
-    if (symbols.empty()) return {};
+    if (symbols.empty()) {
+        if (add_eos) return {2};
+        return {};
+    }
 
     for (const auto& merge : merges_) {
         std::vector<std::string> new_symbols;
@@ -123,6 +126,9 @@ std::vector<int> BPETokenizer::encode(const std::string& text) const {
             tokens.push_back(0);
         }
     }
+    if (add_eos) {
+        tokens.push_back(2); // Append <eos> token ID
+    }
     return tokens;
 }
 
@@ -130,7 +136,7 @@ std::string BPETokenizer::decode(const std::vector<int>& tokens) const {
     std::string text;
     for (int token : tokens) {
         if (token >= 0 && token < static_cast<int>(vocab_.size())) {
-            if (token == 0 || token == 1) continue;
+            if (token == 0 || token == 1 || token == 2) continue; // Skip <unk>, <pad>, <eos>
             text += vocab_[token];
         }
     }

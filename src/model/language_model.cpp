@@ -149,7 +149,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         int train_samples = 0;
         
         for (const auto& text : train_set) {
-            std::vector<int> tokens = bpe != nullptr ? bpe->encode(text) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
+            std::vector<int> tokens = bpe != nullptr ? bpe->encode(text, true) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
             if (tokens.size() <= 1) continue;
             
             std::vector<std::vector<float>> input_seq(tokens.size());
@@ -241,7 +241,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         float total_val_loss = 0.0f;
         int val_samples = 0;
         for (const auto& text : val_set) {
-            std::vector<int> tokens = bpe != nullptr ? bpe->encode(text) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
+            std::vector<int> tokens = bpe != nullptr ? bpe->encode(text, true) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
             if (tokens.size() <= 1) continue;
             std::vector<std::vector<float>> input_seq(tokens.size());
             for (size_t i = 0; i < tokens.size(); ++i) {
@@ -381,7 +381,7 @@ std::string LanguageModel::generate(const std::string& input_text, int max_lengt
 
         tokens.push_back(next_token);
 
-        if (next_token == 0 || next_token == '\n') break;
+        if (next_token == 0 || next_token == 1 || next_token == 2 || next_token == '\n') break;
     }
 
     if (bpe != nullptr) {

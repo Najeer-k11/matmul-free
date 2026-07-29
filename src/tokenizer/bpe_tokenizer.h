@@ -12,7 +12,7 @@ class BPETokenizer {
 public:
     BPETokenizer();
     void build_vocab_from_corpus(const std::vector<std::string>& corpus, int target_vocab_size = 400);
-    std::vector<int> encode(const std::string& text) const;
+    std::vector<int> encode(const std::string& text, bool add_eos = false) const;
     std::string decode(const std::vector<int>& tokens) const;
     int vocab_size() const { return static_cast<int>(vocab_.size()); }
 
