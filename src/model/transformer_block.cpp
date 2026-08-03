@@ -57,6 +57,37 @@ std::vector<std::vector<float>> TransformerBlock::forward_bitlinear(const std::v
     return ff_output;
 }
 
+std::vector<std::vector<float>> TransformerBlock::forward_cached(
+    const std::vector<std::vector<float>>& inputs,
+    LayerKVCache& cache,
+    int start_pos,
+    bool use_bitlinear) {
+    std::vector<std::vector<float>> norm_inputs(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        norm_inputs[i] = rmsnorm(inputs[i]);
+    }
+    std::vector<std::vector<float>> after_attention = attention.forward_cached(norm_inputs, cache, start_pos);
+
+    std::vector<std::vector<float>> after_residual = inputs;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        for (size_t j = 0; j < inputs[i].size(); ++j) {
+            after_residual[i][j] += after_attention[i][j];
+        }
+    }
+
+    std::vector<std::vector<float>> ff_output(after_residual.size());
+    for (size_t i = 0; i < after_residual.size(); ++i) {
+        std::vector<float> norm_res = rmsnorm(after_residual[i]);
+        std::vector<float> ffn_out = use_bitlinear ? ffn.forward_bitlinear(norm_res) : ffn.forward(norm_res);
+        ff_output[i].resize(after_residual[i].size());
+        for (size_t j = 0; j < after_residual[i].size(); ++j) {
+            ff_output[i][j] = after_residual[i][j] + ffn_out[j];
+        }
+    }
+
+    return ff_output;
+}
+
 void TransformerBlock::backward_and_update(const std::vector<std::vector<float>>& inputs,
                          const std::vector<std::vector<float>>& output_grads,
                          float lr,

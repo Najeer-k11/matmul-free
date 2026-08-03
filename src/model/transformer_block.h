@@ -18,6 +18,10 @@ struct TransformerBlock {
     
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs);
     std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs);
+    std::vector<std::vector<float>> forward_cached(const std::vector<std::vector<float>>& inputs,
+                                                   LayerKVCache& cache,
+                                                   int start_pos = 0,
+                                                   bool use_bitlinear = false);
     void backward_and_update(const std::vector<std::vector<float>>& inputs,
                              const std::vector<std::vector<float>>& output_grads,
                              float lr,

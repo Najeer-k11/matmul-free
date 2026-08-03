@@ -55,7 +55,8 @@ size, or corpus, instability can still resurface — watch the per-epoch loss lo
 
 ```text
 matmul-free/
-├── cpps.toml                    # Build config for the `cpps` runner (see below)
+├── CMakeLists.txt               # CMake build configuration
+├── Makefile                     # Makefile for GNU Make
 ├── corpus.txt                   # Training corpus (208 short story lines)
 ├── TASKS.md                     # Project roadmap / phase checklist
 ├── LICENSE                      # MIT License
@@ -95,51 +96,37 @@ matmul-free/
 
 ## How to build and run
 
-### Option A — using the `cpps` tool (recommended)
+Make sure your system has a C++ compiler supporting C++17 (e.g. GCC 7+, Clang 6+, or MSVC 2019+).
 
-[`cpps`](https://github.com/Najeer-k11/cpps) is a small cross-platform CLI that wraps
-compiler detection, project scaffolding, and build/run in one command (comparable to
-`cargo run` for Rust or `npm run` for Node). This repo already has a `cpps.toml`, so once
-`cpps` is installed you don't need to think about compiler flags at all.
+### Option A — using GNU Make (Linux / macOS)
 
-1. **Install `cpps`** — pick whichever matches your platform:
-   - Windows: download the `.msi` from the [cpps Releases page](https://github.com/Najeer-k11/cpps/releases)
-     (adds it to `PATH` automatically), or run the PowerShell install script from the cpps repo.
-   - From source (any OS with a Rust toolchain): `cargo install --path .` inside a clone of
-     the cpps repo.
-   - `cpps doctor --fix` afterward will detect and, if needed, install a C++ compiler,
-     CMake/Ninja, and vcpkg for you.
-
-2. **Run this project:**
-   ```bash
-   cd matmul-free
-   cpps run
-   ```
-   `cpps` reads `cpps.toml`, compiles everything under `src/` with the flags below, and
-   immediately runs the resulting binary.
-
-`cpps.toml` in this repo currently specifies:
-```toml
-[project]
-name    = "matmul-free-1"
-version = "0.1.0"
-std     = "c++17"
-
-[compiler]
-preferred = "auto"
-flags     = ["-Wall", "-O3", "-fopenmp"]
-
-[build]
-src_dir = "src"
-out_dir = "build"
-entry   = "src/main.cpp"
+Build and run with a single command:
+```bash
+make run
+```
+Or build explicitly:
+```bash
+make
+./matmul_free_llm
+```
+To clean build artifacts:
+```bash
+make clean
 ```
 
 ---
 
-### Option B — compiling directly with a C++ compiler
+### Option B — using CMake (Cross-Platform)
 
-No `cpps` required — just make sure your compiler supports C++17 and OpenMP.
+```bash
+cmake -B build
+cmake --build build
+./build/matmul_free_llm
+```
+
+---
+
+### Option C — compiling directly with a C++ compiler
 
 **GCC / Clang (Linux/macOS/MinGW):**
 ```bash

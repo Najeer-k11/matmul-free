@@ -1,6 +1,7 @@
 #ifndef MATMUL_FREE_ATTENTION_H
 #define MATMUL_FREE_ATTENTION_H
 
+#include "kv_cache.h"
 #include <vector>
 
 namespace matmul_free {
@@ -18,6 +19,13 @@ struct AttentionLayer {
     int hidden_dim = 0;     // Hidden dimension (FFN width)
     
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs) const;
+    std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs) const;
+    std::vector<std::vector<float>> forward_cached(const std::vector<std::vector<float>>& inputs,
+                                                  LayerKVCache& cache,
+                                                  int start_pos = 0) const;
+    std::vector<std::vector<float>> forward_bitlinear_cached(const std::vector<std::vector<float>>& inputs,
+                                                            LayerKVCache& cache,
+                                                            int start_pos = 0) const;
     void backward_and_update(const std::vector<std::vector<float>>& inputs,
                              const std::vector<std::vector<float>>& output_grads,
                              float lr,

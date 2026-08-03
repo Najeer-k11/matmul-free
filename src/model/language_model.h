@@ -21,6 +21,7 @@ public:
 
     void resize_vocab(int new_vocab_size);
     std::vector<float> get_logits(const std::vector<float>& hidden) const;
+    std::vector<float> get_logits_bitlinear(const std::vector<float>& hidden) const;
     void clip_grad_norm(std::vector<std::vector<float>>& grads, float max_norm = 1.0f) const;
 
     void train(const std::vector<std::string>& training_data, 
@@ -30,6 +31,10 @@ public:
     std::string generate(const std::string& input_text, int max_length = 20,
                          float temperature = 1.0f, int top_k = 0, float top_p = 1.0f,
                          bool use_bitlinear = false, const BPETokenizer* bpe = nullptr);
+
+    std::string generate_fast(const std::string& input_text, int max_length = 20,
+                              float temperature = 1.0f, int top_k = 0, float top_p = 1.0f,
+                              bool use_bitlinear = false, const BPETokenizer* bpe = nullptr);
 
     float compute_loss(const std::vector<std::vector<float>>& seq, 
                        const std::vector<int>& target_tokens);

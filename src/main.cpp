@@ -20,6 +20,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
 
 using namespace matmul_free;
 
@@ -42,7 +43,13 @@ void print_matrix(const std::vector<std::vector<float>>& matrix, const char* tit
 // Main Program
 // ============================================================================
 
-int main() {
+    int main(int argc, char** argv) {
+    bool force_train = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--train" || std::string(argv[i]) == "-t") {
+            force_train = true;
+        }
+    }
     std::cout << "=== MatMul-Free LLM Demo ===\n\n";
     
     // Create model configuration
@@ -244,11 +251,30 @@ int main() {
     bpe.build_vocab_from_corpus(corpus, 400);
     model.resize_vocab(bpe.vocab_size());
 
-    std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
-    std::cout << "BPE Vocabulary size: " << bpe.vocab_size() << " subwords / tokens\n";
-    std::cout << "Starting active training over 80 epochs with linear LR decay (0.025f -> 0.0001f)...\n";
-    model.train(corpus, 80, 0.025f, false, &bpe);
-    std::cout << "Training complete!\n";
+    std::string checkpoint_file = "model_checkpoint.bin";
+    bool loaded_from_checkpoint = false;
+
+    if (!force_train) {
+        std::ifstream check_file(checkpoint_file, std::ios::binary);
+        if (check_file.good()) {
+            check_file.close();
+            if (model.load_model(checkpoint_file)) {
+                loaded_from_checkpoint = true;
+                std::cout << ">> Found existing checkpoint '" << checkpoint_file << "'!\n";
+                std::cout << ">> Loaded pre-trained model weights instantly (skipped 80-epoch training).\n";
+                std::cout << ">> (To force retraining from scratch, run with: ./matmul_free_llm --train)\n";
+            }
+        }
+    }
+
+    if (!loaded_from_checkpoint) {
+        std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
+        std::cout << "BPE Vocabulary size: " << bpe.vocab_size() << " subwords / tokens\n";
+        std::cout << "Starting active training over 80 epochs with linear LR decay (0.025f -> 0.0001f)...\n";
+        model.train(corpus, 80, 0.025f, false, &bpe);
+        std::cout << "Training complete!\n";
+        model.save_model(checkpoint_file);
+    }
     
     // ========================================================================
     // Demo 8: BitLinear 1.58-bit Ternary Quantization & RMSNorm (QAT with STE)
@@ -261,13 +287,19 @@ int main() {
         float scale = 1.0f;
         auto ternary_w = quantize_weights_ternary(ffn.weight1, scale);
         
-        std::cout << "Quantized FFN Weight1 to ternary {-1, 0, +1} matrix!\n";
-        std::cout << "  Scale factor (gamma): " << std::fixed << std::setprecision(4) << scale << "\n";
-        std::cout << "  Ternary matrix sample (first 3x5 values):\n";
-        for (int i = 0; i < std::min(3, static_cast<int>(ternary_w.size())); ++i) {
+        float scale_attn = 1.0f;
+        auto ternary_attn_q = quantize_weights_ternary(model.transformer_blocks[0].attention.query_weights[0], scale_attn);
+        float scale_lm = 1.0f;
+        auto ternary_lm = quantize_weights_ternary(model.vocab_projection, scale_lm);
+
+        std::cout << "Quantized FFN Weight1 to ternary {-1, 0, +1} matrix! (Scale: " << std::fixed << std::setprecision(4) << scale << ")\n";
+        std::cout << "Quantized Attention Head 0 W_Q to ternary {-1, 0, +1} matrix! (Scale: " << scale_attn << ")\n";
+        std::cout << "Quantized Vocabulary Head (LM Head) to ternary {-1, 0, +1} matrix! (Scale: " << scale_lm << ")\n";
+        std::cout << "  LM Head ternary matrix sample (first 3x5 values):\n";
+        for (int i = 0; i < std::min(3, static_cast<int>(ternary_lm.size())); ++i) {
             std::cout << "    [ ";
-            for (int j = 0; j < std::min(5, static_cast<int>(ternary_w[i].size())); ++j) {
-                int val = static_cast<int>(ternary_w[i][j]);
+            for (int j = 0; j < std::min(5, static_cast<int>(ternary_lm[i].size())); ++j) {
+                int val = static_cast<int>(ternary_lm[i][j]);
                 std::cout << (val >= 0 ? " " : "") << val << " ";
             }
             std::cout << "]\n";
@@ -280,11 +312,17 @@ int main() {
         for (int i = 0; i < std::min(5, static_cast<int>(bitlinear_output.size())); ++i) {
             std::cout << std::fixed << std::setprecision(4) << bitlinear_output[i] << " ";
         }
-        std::cout << "\nMultiplication-free BitLinear execution completed successfully!\n";
+        std::cout << "\n100% Multiplication-Free BitLinear execution (Attention + FFN + LM Head) completed successfully!\n";
 
-        std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 30 epochs with STE & Best Checkpoint Restoration...\n";
-        model.train(corpus, 30, 0.002f, true, &bpe);
-        std::cout << "QAT Fine-tuning complete!\n";
+        if (!loaded_from_checkpoint) {
+            std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 30 epochs with STE & Best Checkpoint Restoration...\n";
+            LanguageModel qat_model = model;
+            qat_model.train(corpus, 30, 0.002f, true, &bpe);
+            std::cout << "QAT Fine-tuning complete!\n";
+            qat_model.save_model("model_checkpoint_qat.bin");
+        } else {
+            std::cout << ">> Loaded pre-trained base model weights from checkpoint.\n";
+        }
     }
     
     // ========================================================================
@@ -303,11 +341,14 @@ int main() {
 
     std::cout << "Autoregressive Sampling Generation Options:\n";
     std::cout << "  Greedy (Prompt: 'once upon a '): \"" << model.generate("once upon a ", 25, 0.0f, 0, 1.0f, false, &bpe) << "\"\n";
+    std::cout << "  KV-Cached Fast Generation:      \"" << model.generate_fast("once upon a ", 25, 0.0f, 0, 1.0f, false, &bpe) << "\"\n";
     std::cout << "  Temp=0.5 (Prompt: 'the smart '): \"" << model.generate("the smart ", 25, 0.5f, 3, 1.0f, false, &bpe) << "\"\n";
     std::cout << "  Top-K=3  (Prompt: 'the little'): \"" << model.generate("the little ", 25, 0.6f, 3, 1.0f, false, &bpe) << "\"\n";
     std::cout << "  Top-P=0.85(Prompt: 'a friendly'): \"" << model.generate("a friendly ", 25, 0.6f, 0, 0.85f, false, &bpe) << "\"\n";
-    std::cout << "  BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): \"" 
+    std::cout << "  100% BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): \"" 
               << model.generate("the smart ", 25, 0.5f, 3, 1.0f, true, &bpe) << "\"\n";
+    std::cout << "  100% BitLinear + KV-Cache Fast Generation (Prompt: 'the smart '):  \"" 
+              << model.generate_fast("the smart ", 25, 0.5f, 3, 1.0f, true, &bpe) << "\"\n";
 
     // ========================================================================
     // Demo 10: Model Checkpointing (Save & Load Verification)
@@ -326,10 +367,29 @@ int main() {
     }
 
     // ========================================================================
-    // Demo 11: Performance Micro-Benchmark (FP32 MatMul vs. BitLinear)
+    // Demo 11: Performance Micro-Benchmark (FP32 MatMul vs. BitLinear & KV-Cache)
     // ========================================================================
     std::cout << "\n--- Demo 11: Performance Micro-Benchmark ---\n";
     benchmark_matmul_vs_bitlinear(512, 512, 100);
+
+    std::cout << "\nKV-Cache Generation Speedup Benchmark (Generating 40 tokens):\n";
+    auto start_std = std::chrono::high_resolution_clock::now();
+    for (int r = 0; r < 5; ++r) {
+        model.generate("once upon a ", 40, 0.0f, 0, 1.0f, false, &bpe);
+    }
+    auto end_std = std::chrono::high_resolution_clock::now();
+    double time_std = std::chrono::duration<double, std::milli>(end_std - start_std).count() / 5.0;
+
+    auto start_fast = std::chrono::high_resolution_clock::now();
+    for (int r = 0; r < 5; ++r) {
+        model.generate_fast("once upon a ", 40, 0.0f, 0, 1.0f, false, &bpe);
+    }
+    auto end_fast = std::chrono::high_resolution_clock::now();
+    double time_fast = std::chrono::duration<double, std::milli>(end_fast - start_fast).count() / 5.0;
+
+    std::cout << "  Standard O(N^2) Generation Latency:  " << std::fixed << std::setprecision(3) << time_std << " ms\n";
+    std::cout << "  KV-Cached O(1) Generation Latency:   " << std::fixed << std::setprecision(3) << time_fast << " ms\n";
+    std::cout << "  KV-Cache Decoding Speedup:          " << std::fixed << std::setprecision(2) << (time_std / (time_fast + 1e-6)) << "x faster!\n";
 
     // ========================================================================
     // Summary

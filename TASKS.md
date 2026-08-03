@@ -37,3 +37,34 @@
 - [x] **Performance & SIMD Benchmarking**
   - [x] Add micro-benchmarks comparing traditional GEMM runtime vs. MatMul-Free dot products (`benchmark_matmul_vs_bitlinear`).
   - [x] Demonstrate 4.00x memory footprint reduction factor and branchless SIMD speedup over FP32 MatMul.
+
+---
+
+## Phase 7: KV-Caching for $O(1)$ Fast Inference
+- [x] **Layer & Model Key-Value Caching**
+  - [x] Add `LayerKVCache` and `ModelKVCache` data structures ([`kv_cache.h`](file:///home/venx/Documents/personal/matmul-free/src/model/kv_cache.h)).
+  - [x] Implement `AttentionLayer::forward_cached` to cache Key and Value vectors across generation steps.
+  - [x] Implement `TransformerBlock::forward_cached` supporting Pre-LN RMSNorm and BitLinear.
+- [x] **Fast Autoregressive Decoding**
+  - [x] Implement `LanguageModel::generate_fast` using prompt prefill and $O(1)$ single-token decoding steps.
+  - [x] Add KV-Cache latency benchmark comparing standard $O(N^2)$ generation against $O(1)$ KV-cached decoding.
+
+---
+
+## Phase 8: 100% MatMul-Free (BitLinear Across All Layers)
+- [x] **Attention Layer BitLinear Quantization**
+  - [x] Quantize $W_Q, W_K, W_V$ projection matrices per head to $\{-1, 0, +1\}$ values.
+  - [x] Implement `AttentionLayer::forward_bitlinear` and `AttentionLayer::forward_bitlinear_cached`.
+- [x] **Vocabulary Output Projection (LM Head) BitLinear Quantization**
+  - [x] Quantize `vocab_projection` matrix to ternary values $\{-1, 0, +1\}$ scaled by $\gamma_{vocab}$.
+  - [x] Implement `LanguageModel::get_logits_bitlinear` for multiplication-free logit generation.
+  - [x] Demonstrate 100% MatMul-Free inference across Attention, FFN, and LM Head.
+
+---
+
+## Phase 11: AdamW Optimizer & Generation Polish
+- [x] **AdamW Optimizer Implementation**
+  - [x] Add `AdamWMatrix` struct with $m_t$ and $v_t$ momentum tracking ([`adamw.h`]).
+  - [x] Update `LanguageModel::train` to use AdamW for parameter updates instead of basic SGD.
+- [x] **Generation Polish**
+  - [x] Implement subword repetition penalties and clean logit probability bounds.
