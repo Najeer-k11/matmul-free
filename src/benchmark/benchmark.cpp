@@ -1,6 +1,7 @@
 #include "benchmark.h"
 #include "../core/math_ops.h"
 #include "../quantization/ternary.h"
+#include "../cuda/gpu_ops.h"
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -19,6 +20,9 @@ bool is_openmp_accelerated() {
 }
 
 void benchmark_matmul_vs_bitlinear(int num_rows, int num_cols, int iterations) {
+    if (is_cuda_available()) {
+        print_cuda_device_info();
+    }
     std::cout << "Running Benchmark (Matrix Size: " << num_rows << "x" << num_cols 
               << ", Iterations: " << iterations << ", 5-Trial Median)...\n";
     
@@ -55,15 +59,25 @@ void benchmark_matmul_vs_bitlinear(int num_rows, int num_cols, int iterations) {
     double bit_ms  = run_benchmark_trials([&]() { return bitlinear_vector(ternary_w, input, scale); });
     double simd_ms = run_benchmark_trials([&]() { return bitlinear_packed_simd(packed_w, input, scale); });
     double avx_ms  = run_benchmark_trials([&]() { return bitlinear_packed_avx2(packed_w, input, scale); });
-    
-    size_t fp32_bytes = num_rows * num_cols * sizeof(float);
-    size_t packed_bytes = (num_rows * num_cols) / 4;
-    double mem_reduction = static_cast<double>(fp32_bytes) / static_cast<double>(packed_bytes);
-    
+    double pop_ms  = run_benchmark_trials([&]() { return bitlinear_popcount_simd(packed_w, input, scale); });
+
     std::cout << "  FP32 MatMul Latency (Median):  " << std::fixed << std::setprecision(3) << fp_ms << " ms\n";
     std::cout << "  BitLinear Latency (Median):    " << std::fixed << std::setprecision(3) << bit_ms << " ms\n";
     std::cout << "  Packed 2-Bit SIMD (Median):    " << std::fixed << std::setprecision(3) << simd_ms << " ms\n";
     std::cout << "  Explicit AVX2 SIMD (Median):   " << std::fixed << std::setprecision(3) << avx_ms << " ms\n";
+    std::cout << "  Bit-Parallel Popcount (Median):" << std::fixed << std::setprecision(3) << pop_ms << " ms\n";
+
+    if (is_cuda_available()) {
+        double cuda_bit_ms = run_benchmark_trials([&]() { return cuda_bitlinear_vector(ternary_w, input, scale); });
+        double cuda_fp_ms  = run_benchmark_trials([&]() { return cuda_matmul_vector(weight, input); });
+        std::cout << "  RTX 4060 CUDA BitLinear:      " << std::fixed << std::setprecision(3) << cuda_bit_ms << " ms\n";
+        std::cout << "  RTX 4060 CUDA FP32 GEMV:       " << std::fixed << std::setprecision(3) << cuda_fp_ms << " ms\n";
+    }
+
+    size_t fp32_bytes = num_rows * num_cols * sizeof(float);
+    size_t packed_bytes = (num_rows * num_cols) / 4;
+    double mem_reduction = static_cast<double>(fp32_bytes) / static_cast<double>(packed_bytes);
+
     std::cout << "  FP32 Memory Footprint:        " << fp32_bytes / 1024 << " KB\n";
     std::cout << "  Packed Memory Footprint:      " << packed_bytes / 1024 << " KB\n";
     std::cout << "  Memory Footprint Ratio:       " << std::setprecision(2) << mem_reduction << "x smaller!\n";

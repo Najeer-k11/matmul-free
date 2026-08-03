@@ -4,6 +4,7 @@
 #include "../sampling/sampling.h"
 #include "../benchmark/benchmark.h"
 #include "../quantization/ternary.h"
+#include "../cuda/gpu_ops.h"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
@@ -129,11 +130,19 @@ void LanguageModel::clip_grad_norm(std::vector<std::vector<float>>& grads, float
 void LanguageModel::train(const std::vector<std::string>& training_data, 
                            int epochs, float initial_learning_rate, bool use_qat,
                            const BPETokenizer* bpe) {
+#if defined(USE_CUDA)
+    if (is_cuda_available()) {
+        std::cout << "  [CUDA GPU Acceleration: ACTIVE (NVIDIA GeForce RTX 4060 Target)]\n";
+    } else {
+        std::cout << "  [OpenMP Multi-Threading: ENABLED]\n";
+    }
+#else
     if (is_openmp_accelerated()) {
         std::cout << "  [OpenMP Multi-Threading: ENABLED]\n";
     } else {
         std::cout << "  [OpenMP Multi-Threading: DISABLED (Single-Threaded)]\n";
     }
+#endif
 
     size_t val_size = std::max(size_t(1), training_data.size() / 10);
     size_t train_size = training_data.size() - val_size;
@@ -159,8 +168,10 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
 
         float total_train_loss = 0.0f;
         int train_samples = 0;
+        int total_sentences = static_cast<int>(train_set.size());
         
-        for (const auto& text : train_set) {
+        for (size_t sample_idx = 0; sample_idx < train_set.size(); ++sample_idx) {
+            const auto& text = train_set[sample_idx];
             std::vector<int> tokens = bpe != nullptr ? bpe->encode(text, true) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
             if (tokens.size() <= 1) continue;
             
@@ -183,7 +194,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             
             float loss = compute_loss(seq, tokens);
             if (std::isnan(loss) || std::isinf(loss)) {
-                std::cout << "  [WARNING] NaN/Inf loss detected at Epoch " << (epoch + 1) << "! Aborting and restoring best checkpoint.\n";
+                std::cout << "\n  [WARNING] NaN/Inf loss detected at Epoch " << (epoch + 1) << "! Aborting and restoring best checkpoint.\n";
                 token_embeddings = best_embeddings;
                 transformer_blocks = best_blocks;
                 vocab_projection = best_vocab;
@@ -244,6 +255,15 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
                 }
             }
             adamw_emb.update(token_embeddings, emb_grads, current_lr, adamw_step);
+
+            if (sample_idx % 4 == 0 || sample_idx + 1 == train_set.size()) {
+                float batch_pct = ((sample_idx + 1) * 100.0f) / static_cast<float>(total_sentences);
+                float curr_avg = train_samples > 0 ? total_train_loss / train_samples : 0.0f;
+                std::cout << "\r  [Epoch " << std::setw(2) << (epoch + 1) << "/" << epochs
+                          << " | Batch " << std::setw(3) << (sample_idx + 1) << "/" << total_sentences
+                          << " (" << std::setw(3) << static_cast<int>(batch_pct) << "%)] "
+                          << "Loss: " << std::fixed << std::setprecision(4) << curr_avg << " " << std::flush;
+            }
         }
 
         float total_val_loss = 0.0f;
@@ -280,10 +300,10 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             best_vocab = vocab_projection;
         }
 
-        std::cout << "  [Epoch " << std::setw(3) << (epoch + 1) << "/" << epochs 
+        std::cout << "\r  [Epoch " << std::setw(2) << (epoch + 1) << "/" << epochs 
                   << " | " << std::setw(5) << std::fixed << std::setprecision(1) << epoch_pct << "%] "
                   << "Train Loss: " << std::setprecision(4) << avg_train_loss 
-                  << " | Val Loss: " << avg_val_loss << "\n";
+                  << " | Val Loss: " << avg_val_loss << "             \n";
 
         if ((epoch + 1) % 10 == 0) {
             std::string sample = generate("the ", 12, 0.5f, 3, 0.85f, use_qat, bpe);

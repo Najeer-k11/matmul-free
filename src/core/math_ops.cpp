@@ -1,4 +1,5 @@
 #include "math_ops.h"
+#include "../cuda/gpu_ops.h"
 #include <limits>
 #include <cfloat>
 #include <cmath>
@@ -9,6 +10,12 @@ std::vector<float> matmul_vector(const std::vector<std::vector<float>>& matrix, 
     if (matrix.empty() || vec.empty()) return {};
     
     size_t rows = matrix.size();
+#if defined(USE_CUDA)
+    if (is_cuda_available() && rows >= 64) {
+        return cuda_matmul_vector(matrix, vec);
+    }
+#endif
+
     size_t cols = matrix[0].size();
     std::vector<float> result(rows, 0.0f);
     

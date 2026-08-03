@@ -68,3 +68,21 @@
   - [x] Update `LanguageModel::train` to use AdamW for parameter updates instead of basic SGD.
 - [x] **Generation Polish**
   - [x] Implement subword repetition penalties and clean logit probability bounds.
+
+---
+
+## Phase 9: Bit-Parallel Popcount SIMD Kernels
+- [x] **Bitwise Popcount Dot Product**
+  - [x] Implement `bitlinear_popcount_simd` using 64-bit masks and hardware population count (`__builtin_popcount`).
+
+---
+
+## Phase 10: Interactive CLI Chat REPL & Tooling
+- [x] **Production CLI Application**
+  - [x] Implement REPL mode (`chat`), training subcommand (`train`), single-prompt mode (`generate`), and benchmark (`benchmark`).
+
+---
+
+## Phase 12: OpenMP Parallelized Attention & Prefill
+- [x] **Multi-Threaded CPU Scaling**
+  - [x] Parallelize attention computation and BitLinear dot products with OpenMP `#pragma omp parallel for`.

@@ -39,6 +39,13 @@ std::vector<float> bitlinear_packed_avx2(const std::vector<std::vector<uint8_t>>
                                           const std::vector<float>& input,
                                           float scale);
 
+/**
+ * Multiplication-free BitLinear dot product using bitwise masks and hardware popcount instructions.
+ */
+std::vector<float> bitlinear_popcount_simd(const std::vector<std::vector<uint8_t>>& packed_weight,
+                                           const std::vector<float>& input,
+                                           float scale);
+
 } // namespace matmul_free
 
 #endif // MATMUL_FREE_TERNARY_H

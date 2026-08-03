@@ -1,5 +1,7 @@
 #include "ternary.h"
+#include "../cuda/gpu_ops.h"
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 #include <immintrin.h>
 
@@ -46,6 +48,12 @@ std::vector<float> bitlinear_vector(const std::vector<std::vector<int8_t>>& weig
                                      const std::vector<float>& input,
                                      float scale) {
     size_t rows = weight_ternary.size();
+#if defined(USE_CUDA)
+    if (is_cuda_available() && rows >= 64) {
+        return cuda_bitlinear_vector(weight_ternary, input, scale);
+    }
+#endif
+
     std::vector<float> output(rows, 0.0f);
 
     #pragma omp parallel for if(rows > 32)
@@ -190,6 +198,50 @@ std::vector<float> bitlinear_packed_avx2(const std::vector<std::vector<uint8_t>>
 #endif
         output[i] = acc * scale;
     }
+    return output;
+}
+
+std::vector<float> bitlinear_popcount_simd(const std::vector<std::vector<uint8_t>>& packed_weight,
+                                           const std::vector<float>& input,
+                                           float scale) {
+    size_t rows = packed_weight.size();
+    std::vector<float> output(rows, 0.0f);
+    size_t cols = input.size();
+
+    #pragma omp parallel for if(rows > 16)
+    for (size_t i = 0; i < rows; ++i) {
+        float acc = 0.0f;
+        const uint8_t* p_row = packed_weight[i].data();
+        size_t packed_bytes = packed_weight[i].size();
+
+        size_t j = 0;
+        size_t byte_i = 0;
+
+        for (; byte_i + 7 < packed_bytes && j + 31 < cols; byte_i += 8) {
+            uint64_t block;
+            std::memcpy(&block, p_row + byte_i, sizeof(uint64_t));
+
+            uint64_t pos_bits = block & 0x5555555555555555ULL;
+            uint64_t neg_bits = (block >> 1) & 0x5555555555555555ULL;
+
+            for (int k = 0; k < 32 && j < cols; ++k, ++j) {
+                float pos_val = (pos_bits >> (k * 2)) & 1ULL ? 1.0f : 0.0f;
+                float neg_val = (neg_bits >> (k * 2)) & 1ULL ? 1.0f : 0.0f;
+                acc += (pos_val - neg_val) * input[j];
+            }
+        }
+
+        static const float kLut[4] = {0.0f, 1.0f, -1.0f, 0.0f};
+        for (; byte_i < packed_bytes && j < cols; ++byte_i) {
+            uint8_t b = p_row[byte_i];
+            for (int shift = 0; shift < 8 && j < cols; shift += 2) {
+                acc += kLut[(b >> shift) & 0b11] * input[j++];
+            }
+        }
+
+        output[i] = acc * scale;
+    }
+
     return output;
 }
 

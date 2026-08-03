@@ -1,12 +1,5 @@
 /**
- * MatMul-Free LLM - Simple C++ Implementation
- * 
- * This program demonstrates a basic language model that avoids traditional
- * matrix multiplication (O(n³)) by using:
- * - Element-wise operations where possible
- * - Dot product implementations instead of matmul
- * - Block-wise processing for large matrices
- * - Numerical stability techniques (log-sum-exp)
+ * MatMul-Free LLM - High Performance C++ CLI & Inference Engine
  */
 
 #include "model/language_model.h"
@@ -21,212 +14,38 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <string>
+#include <vector>
 
 using namespace matmul_free;
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-void print_matrix(const std::vector<std::vector<float>>& matrix, const char* title = nullptr) {
-    if (title != nullptr) std::cout << "\n" << title << ":\n";
-    
-    for (const auto& row : matrix) {
-        for (float val : row) {
-            std::cout << std::fixed << std::setprecision(4) << val << " ";
-        }
-        std::cout << "\n";
-    }
+void print_help(const char* prog_name) {
+    std::cout << "Usage: " << prog_name << " [COMMAND] [OPTIONS]\n\n";
+    std::cout << "Commands:\n";
+    std::cout << "  chat                              Start interactive REPL chat session (default)\n";
+    std::cout << "  generate --prompt \"<text>\"        Generate text completion for a prompt\n";
+    std::cout << "  train [--corpus FILE] [--epochs N] Train model on text corpus using AdamW\n";
+    std::cout << "  benchmark                         Run FP32 GEMM vs BitLinear vs Popcount SIMD benchmarks\n";
+    std::cout << "  demo                              Run sequential 11-stage feature demonstration suite\n";
+    std::cout << "  help                              Show this help menu\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  --prompt \"text\"                 Input text prompt for generation\n";
+    std::cout << "  --corpus  filepath               Corpus text file for training (default: corpus.txt)\n";
+    std::cout << "  --epochs  N                      Number of training epochs (default: 80)\n";
+    std::cout << "  --max-len N                      Maximum token length to generate (default: 35)\n";
+    std::cout << "  --temp    T                      Sampling temperature (default: 0.7)\n\n";
 }
 
-// ============================================================================
-// Main Program
-// ============================================================================
-
-    int main(int argc, char** argv) {
-    bool force_train = false;
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--train" || std::string(argv[i]) == "-t") {
-            force_train = true;
-        }
-    }
-    std::cout << "=== MatMul-Free LLM Demo ===\n\n";
-    
-    // Create model configuration
-    ModelConfig config;
-    config.hidden_dim = 128;          // 128 hidden dim for higher capacity
-    config.num_heads = 4;             // 4 attention heads (head_dim = 32)
-    config.num_layers = 3;            // 3 transformer layers
-    config.max_seq_len = 128;         // Max sequence length
-    
-    std::cout << "Model Configuration:\n";
-    std::cout << "  Hidden Dimension: " << config.hidden_dim << "\n";
-    std::cout << "  Number of Heads: " << config.num_heads << "\n";
-    std::cout << "  Number of Layers: " << config.num_layers << "\n";
-    std::cout << "  Max Sequence Length: " << config.max_seq_len << "\n\n";
-    
-    // Create language model instance
-    LanguageModel model(config);
-    
-    std::cout << "Language Model created successfully!\n";
-    std::cout << "Total transformer blocks: " << model.transformer_blocks.size() << "\n\n";
-    
-    // ========================================================================
-    // Demo 1: Text Tokenization and Encoding
-    // ========================================================================
-    std::cout << "--- Demo 1: Text Processing ---\n";
-    
-    std::string test_text = "Hello, this is a simple demonstration of the matmul-free LLM.";
-    std::cout << "\nOriginal text: \"" << test_text << "\"\n";
-    
-    // Tokenize and encode (all methods are inline now)
-    auto tokens = tokenize_text(test_text, model.token_embeddings.size());
-    std::vector<std::vector<float>> encoded = model.encode_text(test_text);
-    
-    std::cout << "Tokenized (first 5): ";
-    for (int i = 0; i < std::min(5, static_cast<int>(tokens.size())); ++i) {
-        std::cout << tokens[i] << " ";
-    }
-    if (static_cast<int>(tokens.size()) > 5) std::cout << "...";
-    std::cout << "\n\n";
-    
-    // ========================================================================
-    // Demo 2: Forward Pass Through Transformer Block
-    // ========================================================================
-    std::cout << "--- Demo 2: Transformer Block Forward Pass ---\n";
-    
-    if (!model.transformer_blocks.empty()) {
-        auto input_seq = encoded;
-        
-        std::cout << "Input sequence shape: " 
-                  << input_seq.size() << " tokens x " 
-                  << input_seq[0].size() << " dimensions\n";
-        
-        // Process through first transformer block
-        TransformerBlock& block = model.transformer_blocks[0];
-        auto output = block.forward(input_seq);
-        
-        std::cout << "\nOutput shape: " 
-                  << output.size() << " tokens x " 
-                  << output[0].size() << " dimensions\n";
-        
-        // Print first few values for inspection
-        std::cout << "First token - First 5 output values: ";
-        for (int i = 0; i < std::min(5, static_cast<int>(output[0].size())); ++i) {
-            std::cout << std::fixed << std::setprecision(4) << output[0][i] << " ";
-        }
-        std::cout << "\n";
-    }
-    
-    // ========================================================================
-    // Demo 3: Text Generation (Simple)
-    // ========================================================================
-    std::cout << "\n--- Demo 3: Simple Text Generation ---\n";
-    
-    std::string input_prompt = "The quick brown fox ";
-    std::cout << "Input prompt: \"" << input_prompt << "\"\n";
-    
-    auto generated = model.generate(input_prompt, 10);
-    std::cout << "Generated text: \"" << generated << "\"\n\n";
-    
-    // ========================================================================
-    // Demo 4: Attention Weights Visualization
-    // ========================================================================
-    std::cout << "--- Demo 4: Attention Mechanism ---\n";
-    
-    if (!model.transformer_blocks.empty()) {
-        auto input_seq = encoded;
-        
-        // Get attention weights from first block
-        const auto& attn_layer = model.transformer_blocks[0].attention;
-        
-        std::cout << "Attention layer configuration:\n";
-        std::cout << "  Input dimension: " << attn_layer.input_dim << "\n";
-        std::cout << "  Hidden dimension: " << attn_layer.hidden_dim << "\n\n";
-        
-        // Process through attention to get weights
-        auto output = attn_layer.forward(input_seq);
-        
-        std::cout << "Attention applied successfully!\n";
-        std::cout << "Output shape: " 
-                  << output.size() << " tokens x " 
-                  << output[0].size() << "\n\n";
-    }
-    
-    // ========================================================================
-    // Demo 5: Loss Computation
-    // ========================================================================
-    std::cout << "--- Demo 5: Cross-Entropy Loss ---\n";
-    
-    if (!model.transformer_blocks.empty()) {
-        auto input_seq = encoded;
-        
-        // Create a simple target sequence (repeat first token)
-        std::vector<std::vector<float>> target_seq(input_seq.size());
-        for (size_t i = 1; i < input_seq.size(); ++i) {
-            int best_idx = 0;
-            float max_val = -1e9f;
-            
-            for (int j = 0; j < static_cast<int>(input_seq[0].size()); ++j) {
-                float dot_product = 0.0f;
-                for (int k = 0; k < config.hidden_dim; ++k) {
-                    dot_product += input_seq[i][k] * input_seq[0][k];
-                }
-                
-                if (dot_product > max_val) {
-                    max_val = dot_product;
-                    best_idx = j;
-                }
-            }
-            
-            target_seq[i] = input_seq[best_idx];
-        }
-        
-        float loss = model.compute_loss(input_seq, target_seq);
-        
-        std::cout << "Cross-entropy loss: " << std::fixed << std::setprecision(4) 
-                  << loss << "\n\n";
-    }
-    
-    // ========================================================================
-    // Demo 6: FFN Layer Forward Pass
-    // ============================================================================
-    std::cout << "--- Demo 6: Feed-Forward Network ---\n";
-    
-    if (!model.transformer_blocks.empty()) {
-        const auto& ffn = model.transformer_blocks[0].ffn;
-        
-        std::vector<float> input_vec(ffn.input_dim, 0.5f);
-        
-        std::cout << "Input to FFN (dimension " << ffn.input_dim << "):\n";
-        
-        auto output = ffn.forward(input_vec);
-        
-        // Print first 5 values for inspection
-        std::cout << "Output from FFN (first 5 values): ";
-        for (int i = 0; i < std::min(5, static_cast<int>(output.size())); ++i) {
-            std::cout << std::fixed << std::setprecision(4) << output[i] << " ";
-        }
-        std::cout << "\n";
-    }
-    
-    // ========================================================================
-    // Demo 7: Active Model Training & Loss Convergence
-    // ========================================================================
-    std::cout << "\n--- Demo 7: Model Training & Backpropagation ---\n";
-    
+std::vector<std::string> load_corpus(const std::string& filepath) {
     std::vector<std::string> corpus;
-    std::ifstream corpus_file("corpus.txt");
-    if (corpus_file.is_open()) {
+    std::ifstream file(filepath);
+    if (file.is_open()) {
         std::string line;
-        while (std::getline(corpus_file, line)) {
-            if (!line.empty()) {
-                corpus.push_back(line);
-            }
+        while (std::getline(file, line)) {
+            if (!line.empty()) corpus.push_back(line);
         }
-        corpus_file.close();
+        file.close();
     }
-    
     if (corpus.empty()) {
         corpus = {
             "once upon a time a smart fox lived in the green forest",
@@ -246,167 +65,178 @@ void print_matrix(const std::vector<std::vector<float>>& matrix, const char* tit
             "matmul free LLM generates text fast without floating point matrix multiplication"
         };
     }
-    
-    BPETokenizer bpe;
-    bpe.build_vocab_from_corpus(corpus, 400);
+    return corpus;
+}
+
+void ensure_model_loaded(LanguageModel& model, BPETokenizer& bpe, int vocab_target = 1024, const std::string& checkpoint_path = "model_checkpoint.bin") {
+    auto corpus = load_corpus("corpus.txt");
+    bpe.build_vocab_from_corpus(corpus, vocab_target);
     model.resize_vocab(bpe.vocab_size());
 
-    std::string checkpoint_file = "model_checkpoint.bin";
-    bool loaded_from_checkpoint = false;
-
-    if (!force_train) {
-        std::ifstream check_file(checkpoint_file, std::ios::binary);
-        if (check_file.good()) {
-            check_file.close();
-            if (model.load_model(checkpoint_file)) {
-                loaded_from_checkpoint = true;
-                std::cout << ">> Found existing checkpoint '" << checkpoint_file << "'!\n";
-                std::cout << ">> Loaded pre-trained model weights instantly (skipped 80-epoch training).\n";
-                std::cout << ">> (To force retraining from scratch, run with: ./matmul_free_llm --train)\n";
-            }
-        }
-    }
-
-    if (!loaded_from_checkpoint) {
-        std::cout << "Training corpus size: " << corpus.size() << " sentences / story lines\n";
-        std::cout << "BPE Vocabulary size: " << bpe.vocab_size() << " subwords / tokens\n";
-        std::cout << "Starting active training over 80 epochs with linear LR decay (0.025f -> 0.0001f)...\n";
+    if (!model.load_model(checkpoint_path)) {
+        std::cout << ">> Model checkpoint '" << checkpoint_path << "' not found. Training initial model (" << model.config_.num_layers << " layers, " << model.config_.hidden_dim << " dim)...\n";
         model.train(corpus, 80, 0.025f, false, &bpe);
-        std::cout << "Training complete!\n";
-        model.save_model(checkpoint_file);
+        model.save_model(checkpoint_path);
+        std::cout << ">> Initial model trained and saved to '" << checkpoint_path << "'.\n";
     }
-    
-    // ========================================================================
-    // Demo 8: BitLinear 1.58-bit Ternary Quantization & RMSNorm (QAT with STE)
-    // ========================================================================
-    std::cout << "\n--- Demo 8: BitLinear 1.58-bit Ternary Quantization (QAT with STE) ---\n";
-    
+}
+
+void run_interactive_chat(LanguageModel& model, const BPETokenizer& bpe, bool use_bitlinear = false) {
+    std::cout << "=======================================================\n";
+    std::cout << "   MatMul-Free LLM - Interactive REPL Chat Engine      \n";
+    std::cout << "=======================================================\n";
+    std::cout << " [Model Size: ~20M Params | Hidden Dim: " << model.config_.hidden_dim << " | Layers: " << model.config_.num_layers << " | Heads: " << model.config_.num_heads << "]\n";
+    std::cout << " [KV-Cache: ENABLED | Mode: " << (use_bitlinear ? "100% BitLinear 1.58-bit" : "Standard Fast Inference") << "]\n";
+    std::cout << " Type your prompt below. Type 'exit', 'quit', or 'q' to stop.\n\n";
+
+    std::string input;
+    while (true) {
+        std::cout << "\nUser > ";
+        if (!std::getline(std::cin, input) || input == "exit" || input == "quit" || input == "q") {
+            std::cout << "Exiting chat session. Goodbye!\n";
+            break;
+        }
+        if (input.empty()) continue;
+
+        std::cout << "Assistant > " << std::flush;
+        auto start = std::chrono::high_resolution_clock::now();
+        std::string response = model.generate_fast(input, 35, 0.7f, 3, 0.9f, use_bitlinear, &bpe);
+        auto end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+        std::cout << response << "\n";
+        std::cout << "  [Generated in " << std::fixed << std::setprecision(2) << ms << " ms | O(1) KV-Cached]\n";
+    }
+}
+
+void run_demo_suite(LanguageModel& model, BPETokenizer& bpe) {
+    std::cout << "=== MatMul-Free LLM Sequential Demo Suite ===\n\n";
+
+    // Demo 1
+    std::cout << "--- Demo 1: Text Processing ---\n";
+    std::string test_text = "Hello, this is a simple demonstration of the matmul-free LLM.";
+    std::cout << "Original text: \"" << test_text << "\"\n";
+    auto tokens = tokenize_text(test_text, model.token_embeddings.size());
+    std::cout << "Tokenized (first 5): ";
+    for (int i = 0; i < std::min(5, static_cast<int>(tokens.size())); ++i) std::cout << tokens[i] << " ";
+    std::cout << "\n\n";
+
+    // Demo 8
+    std::cout << "--- Demo 8: BitLinear 1.58-bit Ternary Quantization (QAT with STE) ---\n";
     if (!model.transformer_blocks.empty()) {
         const auto& ffn = model.transformer_blocks[0].ffn;
-        
         float scale = 1.0f;
         auto ternary_w = quantize_weights_ternary(ffn.weight1, scale);
-        
-        float scale_attn = 1.0f;
-        auto ternary_attn_q = quantize_weights_ternary(model.transformer_blocks[0].attention.query_weights[0], scale_attn);
-        float scale_lm = 1.0f;
-        auto ternary_lm = quantize_weights_ternary(model.vocab_projection, scale_lm);
-
         std::cout << "Quantized FFN Weight1 to ternary {-1, 0, +1} matrix! (Scale: " << std::fixed << std::setprecision(4) << scale << ")\n";
-        std::cout << "Quantized Attention Head 0 W_Q to ternary {-1, 0, +1} matrix! (Scale: " << scale_attn << ")\n";
-        std::cout << "Quantized Vocabulary Head (LM Head) to ternary {-1, 0, +1} matrix! (Scale: " << scale_lm << ")\n";
-        std::cout << "  LM Head ternary matrix sample (first 3x5 values):\n";
-        for (int i = 0; i < std::min(3, static_cast<int>(ternary_lm.size())); ++i) {
-            std::cout << "    [ ";
-            for (int j = 0; j < std::min(5, static_cast<int>(ternary_lm[i].size())); ++j) {
-                int val = static_cast<int>(ternary_lm[i][j]);
-                std::cout << (val >= 0 ? " " : "") << val << " ";
-            }
-            std::cout << "]\n";
-        }
-        
-        std::vector<float> input_vec(ffn.input_dim, 0.5f);
-        auto bitlinear_output = ffn.forward_bitlinear(input_vec);
-        
-        std::cout << "\nOutput from BitLinear FFN (first 5 values): ";
-        for (int i = 0; i < std::min(5, static_cast<int>(bitlinear_output.size())); ++i) {
-            std::cout << std::fixed << std::setprecision(4) << bitlinear_output[i] << " ";
-        }
-        std::cout << "\n100% Multiplication-Free BitLinear execution (Attention + FFN + LM Head) completed successfully!\n";
-
-        if (!loaded_from_checkpoint) {
-            std::cout << "\nRunning Quantization-Aware Training (QAT) fine-tuning over 30 epochs with STE & Best Checkpoint Restoration...\n";
-            LanguageModel qat_model = model;
-            qat_model.train(corpus, 30, 0.002f, true, &bpe);
-            std::cout << "QAT Fine-tuning complete!\n";
-            qat_model.save_model("model_checkpoint_qat.bin");
-        } else {
-            std::cout << ">> Loaded pre-trained base model weights from checkpoint.\n";
-        }
     }
-    
-    // ========================================================================
-    // Demo 9: Sampling Strategies & BPE Subword Tokenization
-    // ========================================================================
-    std::cout << "\n--- Demo 9: Sampling Strategies & BPE Tokenization ---\n";
-    
-    std::string bpe_input = "matmul free language model deep learning";
-    auto bpe_tokens = bpe.encode(bpe_input);
-    
-    std::cout << "BPE Subword Tokenization:\n";
-    std::cout << "  Input Text: \"" << bpe_input << "\"\n";
-    std::cout << "  BPE Token IDs (" << bpe_tokens.size() << " tokens): ";
-    for (int id : bpe_tokens) std::cout << id << " ";
-    std::cout << "\n  Decoded Text: \"" << bpe.decode(bpe_tokens) << "\"\n\n";
 
-    std::cout << "Autoregressive Sampling Generation Options:\n";
+    // Demo 9
+    std::cout << "\n--- Demo 9: Sampling Strategies & BPE Tokenization ---\n";
     std::cout << "  Greedy (Prompt: 'once upon a '): \"" << model.generate("once upon a ", 25, 0.0f, 0, 1.0f, false, &bpe) << "\"\n";
     std::cout << "  KV-Cached Fast Generation:      \"" << model.generate_fast("once upon a ", 25, 0.0f, 0, 1.0f, false, &bpe) << "\"\n";
-    std::cout << "  Temp=0.5 (Prompt: 'the smart '): \"" << model.generate("the smart ", 25, 0.5f, 3, 1.0f, false, &bpe) << "\"\n";
-    std::cout << "  Top-K=3  (Prompt: 'the little'): \"" << model.generate("the little ", 25, 0.6f, 3, 1.0f, false, &bpe) << "\"\n";
-    std::cout << "  Top-P=0.85(Prompt: 'a friendly'): \"" << model.generate("a friendly ", 25, 0.6f, 0, 0.85f, false, &bpe) << "\"\n";
-    std::cout << "  100% BitLinear 1.58-bit Ternary Generation (Prompt: 'the smart '): \"" 
-              << model.generate("the smart ", 25, 0.5f, 3, 1.0f, true, &bpe) << "\"\n";
-    std::cout << "  100% BitLinear + KV-Cache Fast Generation (Prompt: 'the smart '):  \"" 
+    std::cout << "  100% BitLinear + KV-Cache Fast Generation: \"" 
               << model.generate_fast("the smart ", 25, 0.5f, 3, 1.0f, true, &bpe) << "\"\n";
 
-    // ========================================================================
-    // Demo 10: Model Checkpointing (Save & Load Verification)
-    // ========================================================================
-    std::cout << "\n--- Demo 10: Model Checkpointing (Save & Load) ---\n";
-    
-    std::string checkpoint_path = "model_checkpoint.bin";
-    if (model.save_model(checkpoint_path)) {
-        std::cout << "Successfully saved model checkpoint to '" << checkpoint_path << "'!\n";
-        
-        LanguageModel loaded_model(config);
-        if (loaded_model.load_model(checkpoint_path)) {
-            std::cout << "Successfully reloaded model checkpoint into fresh LanguageModel instance!\n";
-            std::cout << "Reloaded token embeddings size: " << loaded_model.token_embeddings.size() << "\n";
-        }
-    }
-
-    // ========================================================================
-    // Demo 11: Performance Micro-Benchmark (FP32 MatMul vs. BitLinear & KV-Cache)
-    // ========================================================================
+    // Demo 11
     std::cout << "\n--- Demo 11: Performance Micro-Benchmark ---\n";
     benchmark_matmul_vs_bitlinear(512, 512, 100);
 
-    std::cout << "\nKV-Cache Generation Speedup Benchmark (Generating 40 tokens):\n";
-    auto start_std = std::chrono::high_resolution_clock::now();
-    for (int r = 0; r < 5; ++r) {
-        model.generate("once upon a ", 40, 0.0f, 0, 1.0f, false, &bpe);
-    }
-    auto end_std = std::chrono::high_resolution_clock::now();
-    double time_std = std::chrono::duration<double, std::milli>(end_std - start_std).count() / 5.0;
-
-    auto start_fast = std::chrono::high_resolution_clock::now();
-    for (int r = 0; r < 5; ++r) {
-        model.generate_fast("once upon a ", 40, 0.0f, 0, 1.0f, false, &bpe);
-    }
-    auto end_fast = std::chrono::high_resolution_clock::now();
-    double time_fast = std::chrono::duration<double, std::milli>(end_fast - start_fast).count() / 5.0;
-
-    std::cout << "  Standard O(N^2) Generation Latency:  " << std::fixed << std::setprecision(3) << time_std << " ms\n";
-    std::cout << "  KV-Cached O(1) Generation Latency:   " << std::fixed << std::setprecision(3) << time_fast << " ms\n";
-    std::cout << "  KV-Cache Decoding Speedup:          " << std::fixed << std::setprecision(2) << (time_std / (time_fast + 1e-6)) << "x faster!\n";
-
-    // ========================================================================
-    // Summary
-    // ========================================================================
     std::cout << "\n=== Demo Complete ===\n";
-    std::cout << "The matmul-free LLM successfully demonstrated:\n";
-    std::cout << "1. Text tokenization and encoding\n";
-    std::cout << "2. Transformer block forward pass (without matrix multiplication)\n";
-    std::cout << "3. Simple text generation\n";
-    std::cout << "4. Attention mechanism\n";
-    std::cout << "5. Cross-entropy loss computation\n";
-    std::cout << "6. Feed-forward network operations\n";
-    std::cout << "7. Model backpropagation and active training loop\n";
-    std::cout << "8. BitLinear 1.58-bit ternary quantization & RMSNorm inference\n";
-    std::cout << "9. Autoregressive Sampling (Temp/Top-K/Top-P) & BPE Subword Tokenization\n";
-    std::cout << "10. Model Checkpointing (Save & Load serialization)\n";
-    std::cout << "11. Performance Micro-Benchmarking (GEMM vs. Multiplication-Free BitLinear)\n\n";
-    
+}
+
+int main(int argc, char** argv) {
+    ModelConfig config;
+    config.hidden_dim = 512;          // Scaled to 512 hidden dimension
+    config.num_heads = 8;             // Scaled to 8 attention heads
+    config.num_layers = 6;            // Scaled to 6 transformer layers
+    config.max_seq_len = 256;         // Scaled to 256 max sequence length
+
+    std::string mode = "chat";
+    std::string prompt = "once upon a time";
+    std::string corpus_file = "corpus.txt";
+    int epochs = 80;
+    int max_len = 35;
+    int vocab_size = 1024;
+    float temp = 0.7f;
+    float lr = -1.0f;
+    bool use_bitlinear = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "chat" || arg == "train" || arg == "generate" || arg == "benchmark" || arg == "demo" || arg == "help") {
+            mode = arg;
+        } else if (arg == "--prompt" && i + 1 < argc) {
+            prompt = argv[++i];
+        } else if (arg == "--corpus" && i + 1 < argc) {
+            corpus_file = argv[++i];
+        } else if (arg == "--epochs" && i + 1 < argc) {
+            epochs = std::stoi(argv[++i]);
+        } else if (arg == "--lr" && i + 1 < argc) {
+            lr = std::stof(argv[++i]);
+        } else if (arg == "--hidden-dim" && i + 1 < argc) {
+            config.hidden_dim = std::stoi(argv[++i]);
+        } else if (arg == "--layers" && i + 1 < argc) {
+            config.num_layers = std::stoi(argv[++i]);
+        } else if (arg == "--heads" && i + 1 < argc) {
+            config.num_heads = std::stoi(argv[++i]);
+        } else if (arg == "--vocab-size" && i + 1 < argc) {
+            vocab_size = std::stoi(argv[++i]);
+        } else if (arg == "--max-len" && i + 1 < argc) {
+            max_len = std::stoi(argv[++i]);
+        } else if (arg == "--temp" && i + 1 < argc) {
+            temp = std::stof(argv[++i]);
+        } else if (arg == "--bitlinear" || arg == "-b") {
+            use_bitlinear = true;
+        } else if (arg == "--help" || arg == "-h") {
+            mode = "help";
+        }
+    }
+
+    if (lr < 0.0f) {
+        lr = (config.hidden_dim > 256) ? 0.002f : 0.025f;
+    }
+
+    LanguageModel model(config);
+    BPETokenizer bpe;
+
+    if (mode == "help") {
+        print_help(argv[0]);
+        return 0;
+    }
+
+    if (mode == "benchmark") {
+        std::cout << "=======================================================\n";
+        std::cout << "   MatMul-Free LLM - Performance Micro-Benchmarks      \n";
+        std::cout << "=======================================================\n";
+        benchmark_matmul_vs_bitlinear(512, 512, 100);
+        return 0;
+    }
+
+    if (mode == "train") {
+        std::cout << ">> Starting AdamW training on corpus '" << corpus_file << "' (" << epochs << " epochs, LR: " << lr << ", " << vocab_size << " vocab target)...\n";
+        auto corpus = load_corpus(corpus_file);
+        bpe.build_vocab_from_corpus(corpus, vocab_size);
+        model.resize_vocab(bpe.vocab_size());
+        model.train(corpus, epochs, lr, false, &bpe);
+        model.save_model("model_checkpoint.bin");
+        std::cout << ">> Training complete! Checkpoint saved to 'model_checkpoint.bin'.\n";
+        return 0;
+    }
+
+    ensure_model_loaded(model, bpe, vocab_size);
+
+    if (mode == "generate") {
+        std::cout << "Prompt: \"" << prompt << "\"\n";
+        std::cout << "Generated: \"" << model.generate_fast(prompt, max_len, temp, 3, 0.9f, use_bitlinear, &bpe) << "\"\n";
+        return 0;
+    }
+
+    if (mode == "demo") {
+        run_demo_suite(model, bpe);
+        return 0;
+    }
+
+    // Default mode: Interactive REPL Chat
+    run_interactive_chat(model, bpe, use_bitlinear);
     return 0;
 }
