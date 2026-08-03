@@ -3,6 +3,16 @@
 
 namespace matmul_free {
 
+void TransformerBlock::upload_to_gpu() {
+    attention.upload_to_gpu();
+    ffn.upload_to_gpu();
+}
+
+void TransformerBlock::download_from_gpu() {
+    attention.download_from_gpu();
+    ffn.download_from_gpu();
+}
+
 std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std::vector<float>>& inputs) {
     std::vector<std::vector<float>> norm_inputs(inputs.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -16,14 +26,21 @@ std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std:
             after_residual[i][j] += after_attention[i][j];
         }
     }
-    
+
+    // RMSNorm all tokens before FFN
+    std::vector<std::vector<float>> norm_residual(after_residual.size());
+    for (size_t i = 0; i < after_residual.size(); ++i)
+        norm_residual[i] = rmsnorm(after_residual[i]);
+
+    // Batched FFN: entire sequence in one GPU SGEMM call
+    std::vector<std::vector<float>> ffn_out_seq = ffn.forward_sequence(norm_residual);
+
     std::vector<std::vector<float>> ff_output(after_residual.size());
     for (size_t i = 0; i < after_residual.size(); ++i) {
-        std::vector<float> norm_res = rmsnorm(after_residual[i]);
-        std::vector<float> ffn_out = ffn.forward(norm_res);
         ff_output[i].resize(after_residual[i].size());
+        const auto& ffn_out = (i < ffn_out_seq.size()) ? ffn_out_seq[i] : norm_residual[i];
         for (size_t j = 0; j < after_residual[i].size(); ++j) {
-            ff_output[i][j] = after_residual[i][j] + ffn_out[j];
+            ff_output[i][j] = after_residual[i][j] + (j < ffn_out.size() ? ffn_out[j] : 0.0f);
         }
     }
     
@@ -44,13 +61,20 @@ std::vector<std::vector<float>> TransformerBlock::forward_bitlinear(const std::v
         }
     }
     
+    // RMSNorm all tokens before FFN
+    std::vector<std::vector<float>> norm_residual(after_residual.size());
+    for (size_t i = 0; i < after_residual.size(); ++i)
+        norm_residual[i] = rmsnorm(after_residual[i]);
+
+    // Batched 1.58-bit BitLinear FFN: zero FP32 multiplies on CUDA GPU!
+    std::vector<std::vector<float>> ffn_out_seq = ffn.forward_bitlinear_sequence(norm_residual);
+
     std::vector<std::vector<float>> ff_output(after_residual.size());
     for (size_t i = 0; i < after_residual.size(); ++i) {
-        std::vector<float> norm_res = rmsnorm(after_residual[i]);
-        std::vector<float> ffn_out = ffn.forward_bitlinear(norm_res);
         ff_output[i].resize(after_residual[i].size());
+        const auto& ffn_out = (i < ffn_out_seq.size()) ? ffn_out_seq[i] : norm_residual[i];
         for (size_t j = 0; j < after_residual[i].size(); ++j) {
-            ff_output[i][j] = after_residual[i][j] + ffn_out[j];
+            ff_output[i][j] = after_residual[i][j] + (j < ffn_out.size() ? ffn_out[j] : 0.0f);
         }
     }
     

@@ -248,4 +248,97 @@ std::vector<std::vector<float>> cuda_matmul_matrix(const std::vector<std::vector
     return C;
 }
 
+__global__ void kernel_bitlinear_sequence(
+    const uint8_t* packed_weight,
+    const float* A,
+    float* C,
+    int T, int K, int N, int packed_K,
+    float scale
+) {
+    int t = blockIdx.y * blockDim.y + threadIdx.y;
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (t < T && n < N) {
+        float acc = 0.0f;
+        const uint8_t* w_row = packed_weight + n * packed_K;
+        const float* a_row = A + t * K;
+        int k = 0;
+
+        for (int p = 0; p < packed_K && k < K; ++p) {
+            uint8_t byte_val = w_row[p];
+            #pragma unroll
+            for (int shift = 0; shift < 8 && k < K; shift += 2) {
+                uint8_t code = (byte_val >> shift) & 0b11;
+                if (code == 1) {
+                    acc += a_row[k];
+                } else if (code == 2) {
+                    acc -= a_row[k];
+                }
+                k++;
+            }
+        }
+
+        C[t * N + n] = acc * scale;
+    }
+}
+
+std::vector<std::vector<float>> cuda_bitlinear_sequence(
+    const std::vector<std::vector<uint8_t>>& packed_weight,
+    const std::vector<std::vector<float>>& A,
+    int unpacked_cols,
+    float scale
+) {
+    if (packed_weight.empty() || packed_weight[0].empty() || A.empty() || A[0].empty()) return {};
+
+    int T = static_cast<int>(A.size());
+    int K = unpacked_cols;
+    int N = static_cast<int>(packed_weight.size());
+    int packed_K = static_cast<int>(packed_weight[0].size());
+
+    std::vector<uint8_t> flat_W(N * packed_K);
+    for (int n = 0; n < N; ++n) {
+        for (int p = 0; p < packed_K; ++p) {
+            flat_W[n * packed_K + p] = packed_weight[n][p];
+        }
+    }
+
+    std::vector<float> flat_A(T * K, 0.0f);
+    for (int t = 0; t < T; ++t) {
+        int lim = static_cast<int>(A[t].size());
+        for (int k = 0; k < K && k < lim; ++k) {
+            flat_A[t * K + k] = A[t][k];
+        }
+    }
+
+    uint8_t* d_W = nullptr;
+    float *d_A = nullptr, *d_C = nullptr;
+    cudaMalloc(&d_W, N * packed_K * sizeof(uint8_t));
+    cudaMalloc(&d_A, T * K * sizeof(float));
+    cudaMalloc(&d_C, T * N * sizeof(float));
+
+    cudaMemcpy(d_W, flat_W.data(), N * packed_K * sizeof(uint8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, flat_A.data(), T * K * sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (T + block.y - 1) / block.y);
+    kernel_bitlinear_sequence<<<grid, block>>>(d_W, d_A, d_C, T, K, N, packed_K, scale);
+    cudaDeviceSynchronize();
+
+    std::vector<float> flat_C(T * N);
+    cudaMemcpy(flat_C.data(), d_C, T * N * sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaFree(d_W);
+    cudaFree(d_A);
+    cudaFree(d_C);
+
+    std::vector<std::vector<float>> C(T, std::vector<float>(N));
+    for (int t = 0; t < T; ++t) {
+        for (int n = 0; n < N; ++n) {
+            C[t][n] = flat_C[t * N + n];
+        }
+    }
+
+    return C;
+}
+
 } // namespace matmul_free

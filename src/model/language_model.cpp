@@ -82,6 +82,15 @@ LanguageModel::LanguageModel(const ModelConfig& config) : config_(config) {
             vocab_projection[i][j] = xavier_init(config.hidden_dim, 256);
         }
     }
+
+    // Upload all weights to GPU VRAM on construction (one-time transfer)
+#if defined(USE_CUDA)
+    if (is_cuda_available()) {
+        for (auto& block : transformer_blocks) {
+            block.upload_to_gpu();
+        }
+    }
+#endif
 }
 
 void LanguageModel::resize_vocab(int new_vocab_size) {
@@ -166,6 +175,15 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         float current_lr = initial_learning_rate * (1.0f - static_cast<float>(epoch) / static_cast<float>(epochs));
         if (current_lr < 0.0001f) current_lr = 0.0001f;
 
+        // Re-sync GPU weight mirrors after backprop updated CPU weights
+#if defined(USE_CUDA)
+        if (is_cuda_available()) {
+            for (auto& block : transformer_blocks) {
+                block.upload_to_gpu();
+            }
+        }
+#endif
+
         float total_train_loss = 0.0f;
         int train_samples = 0;
         int total_sentences = static_cast<int>(train_set.size());
@@ -217,14 +235,25 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
                     d_logits[target_token] -= 1.0f;
                 }
                 
+                #pragma omp parallel for if(vocab_sz > 32)
+                for (int k = 0; k < vocab_sz; ++k) {
+                    float dl_k = d_logits[k];
+                    if (std::isnan(dl_k) || std::isinf(dl_k) || dl_k == 0.0f) continue;
+                    float* vg_row = vocab_grads[k].data();
+                    const float* s_row = seq[t].data();
+                    for (int d = 0; d < config_.hidden_dim; ++d) {
+                        float s_td = (std::isnan(s_row[d]) || std::isinf(s_row[d])) ? 0.0f : s_row[d];
+                        vg_row[d] += dl_k * s_td;
+                    }
+                }
+
+                #pragma omp parallel for if(config_.hidden_dim > 32)
                 for (int d = 0; d < config_.hidden_dim; ++d) {
                     float sum = 0.0f;
                     for (int k = 0; k < vocab_sz; ++k) {
                         float dl_k = d_logits[k];
                         if (std::isnan(dl_k) || std::isinf(dl_k)) continue;
                         sum += vocab_projection[k][d] * dl_k;
-                        float s_td = (std::isnan(seq[t][d]) || std::isinf(seq[t][d])) ? 0.0f : seq[t][d];
-                        vocab_grads[k][d] += dl_k * s_td;
                     }
                     hidden_grads[t][d] = sum;
                 }

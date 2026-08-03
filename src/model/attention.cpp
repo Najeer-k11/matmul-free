@@ -1,10 +1,42 @@
 #include "attention.h"
 #include "../core/math_ops.h"
 #include "../quantization/ternary.h"
+#include "../cuda/gpu_buffer.h"
 #include <cmath>
 #include <algorithm>
 
 namespace matmul_free {
+
+// ── GPU upload / download ────────────────────────────────────────────────────
+
+void AttentionLayer::upload_to_gpu() {
+#if defined(USE_CUDA)
+    int num_heads = static_cast<int>(query_weights.size());
+    gpu_query_weights.resize(num_heads);
+    gpu_key_weights.resize(num_heads);
+    gpu_value_weights.resize(num_heads);
+    for (int h = 0; h < num_heads; ++h) {
+        gpu_query_weights[h].to_device(query_weights[h]);
+        gpu_key_weights[h].to_device(key_weights[h]);
+        gpu_value_weights[h].to_device(value_weights[h]);
+    }
+    gpu_dirty = false;
+#endif
+}
+
+void AttentionLayer::download_from_gpu() {
+#if defined(USE_CUDA)
+    int num_heads = static_cast<int>(gpu_query_weights.size());
+    query_weights.resize(num_heads);
+    key_weights.resize(num_heads);
+    value_weights.resize(num_heads);
+    for (int h = 0; h < num_heads; ++h) {
+        if (gpu_query_weights[h].is_allocated()) query_weights[h] = gpu_query_weights[h].from_device();
+        if (gpu_key_weights[h].is_allocated())   key_weights[h]   = gpu_key_weights[h].from_device();
+        if (gpu_value_weights[h].is_allocated())  value_weights[h]  = gpu_value_weights[h].from_device();
+    }
+#endif
+}
 
 std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::vector<float>>& inputs) const {
     int num_tokens = static_cast<int>(inputs.size());
@@ -20,13 +52,37 @@ std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::v
 
         std::vector<std::vector<float>> all_k(num_tokens);
         std::vector<std::vector<float>> all_v(num_tokens);
+
+#if defined(USE_CUDA)
+        bool use_gpu = !gpu_dirty &&
+                       h < static_cast<int>(gpu_key_weights.size()) &&
+                       gpu_key_weights[h].is_allocated();
+#else
+        constexpr bool use_gpu = false;
+#endif
+
         for (int j = 0; j < num_tokens; ++j) {
-            all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j, head_dim);
-            all_v[j] = matmul_vector(value_weights[h], inputs[j]);
+#if defined(USE_CUDA)
+            if (use_gpu) {
+                all_k[j] = apply_rope(gpu_key_weights[h].gemv_cpu(inputs[j]), j, head_dim);
+                all_v[j] = gpu_value_weights[h].gemv_cpu(inputs[j]);
+            } else {
+#endif
+                all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j, head_dim);
+                all_v[j] = matmul_vector(value_weights[h], inputs[j]);
+#if defined(USE_CUDA)
+            }
+#endif
         }
 
         for (int i = 0; i < num_tokens; ++i) {
+#if defined(USE_CUDA)
+            std::vector<float> q = apply_rope(
+                use_gpu ? gpu_query_weights[h].gemv_cpu(inputs[i]) : matmul_vector(query_weights[h], inputs[i]),
+                i, head_dim);
+#else
             std::vector<float> q = apply_rope(matmul_vector(query_weights[h], inputs[i]), i, head_dim);
+#endif
 
             std::vector<float> scores(i + 1, 0.0f);
             float max_score = -1e9f;
@@ -447,6 +503,9 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
             }
         }
     }
+#if defined(USE_CUDA)
+    gpu_dirty = true; // weights updated on CPU; GPU mirrors need refresh
+#endif
 }
 
 void AttentionLayer::backward(std::vector<std::vector<float>>& input_grads, 
@@ -455,3 +514,4 @@ void AttentionLayer::backward(std::vector<std::vector<float>>& input_grads,
 }
 
 } // namespace matmul_free
+

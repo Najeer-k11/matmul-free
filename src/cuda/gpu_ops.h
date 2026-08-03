@@ -37,10 +37,12 @@ std::vector<float> cuda_bitlinear_packed(const std::vector<std::vector<uint8_t>>
                                          float scale);
 
 /**
- * Fast GPU CUDA Matrix GEMM multiplication for sequence matrices: C = A * W^T
+ * Fast GPU CUDA BitLinear ternary sequence GEMM (MatMul-Free: zero FP32 multiplies).
  */
-std::vector<std::vector<float>> cuda_matmul_matrix(const std::vector<std::vector<float>>& A,
-                                                   const std::vector<std::vector<float>>& W);
+std::vector<std::vector<float>> cuda_bitlinear_sequence(const std::vector<std::vector<uint8_t>>& packed_weight,
+                                                        const std::vector<std::vector<float>>& A,
+                                                        int unpacked_cols,
+                                                        float scale);
 
 } // namespace matmul_free
 

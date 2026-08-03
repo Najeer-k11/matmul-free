@@ -15,7 +15,13 @@ struct TransformerBlock {
     FFN ffn;                   // Feed-forward network
     
     int input_dim = 0;         // Input dimension (token embeddings)
-    
+
+    /** Upload all weights (attention Q/K/V and FFN W1/W2) to GPU VRAM. */
+    void upload_to_gpu();
+
+    /** Download GPU weights back to CPU (for save/load). */
+    void download_from_gpu();
+
     std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs);
     std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs);
     std::vector<std::vector<float>> forward_cached(const std::vector<std::vector<float>>& inputs,

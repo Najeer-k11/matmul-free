@@ -59,6 +59,13 @@ struct GpuMatrix {
      */
     std::vector<float> gemv_cpu(const std::vector<float>& x) const;
 
+    /**
+     * Batched sequence GEMM: computes Out[T x rows] = In[T x cols] * W^T
+     * Takes the full sequence matrix (T tokens x cols features) in one GPU launch.
+     * Far more efficient than calling gemv_cpu() T times.
+     */
+    std::vector<std::vector<float>> gemm_sequence(const std::vector<std::vector<float>>& seq_input) const;
+
     bool is_allocated() const { return d_ptr != nullptr; }
 };
 

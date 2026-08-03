@@ -6,10 +6,10 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=sm_89 -I src -Xcompiler -fPIC
 HAS_NVCC := $(shell which nvcc 2>/dev/null)
 
 ifneq ($(HAS_NVCC),)
-    CXXFLAGS += -DUSE_CUDA
+    CXXFLAGS += -DUSE_CUDA -I/usr/local/cuda/include -I/usr/include/cuda
     CUDA_SRCS = $(shell find src -name "*.cu")
     CUDA_OBJS = $(patsubst src/%.cu, $(BUILD_DIR)/%.o, $(CUDA_SRCS))
-    CUDA_LIBS = -L/usr/local/cuda/lib64 -lcudart
+    CUDA_LIBS = -L/usr/lib/x86_64-linux-gnu -lcublas -lcudart
 else
     CUDA_SRCS =
     CUDA_OBJS =
