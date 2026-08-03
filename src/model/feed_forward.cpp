@@ -228,4 +228,71 @@ void FFN::backward(std::vector<float>& grad_x, const std::vector<float>& output_
     backward_and_update(grad_x, output_grad, 0.0f, grad_x);
 }
 
+void FFN::backward_and_update_sequence(const std::vector<std::vector<float>>& seq_x,
+                                      const std::vector<std::vector<float>>& seq_output_grad,
+                                      float lr,
+                                      std::vector<std::vector<float>>& seq_grad_x,
+                                      const FFNActivations* act) {
+    timing::ScopedTimerAccumulator timer(timing::g_stats.backward_ffn_time_ms);
+    size_t T = seq_output_grad.size();
+    if (T == 0 || weight1.empty()) {
+        seq_grad_x.assign(T, std::vector<float>(input_dim, 0.0f));
+        return;
+    }
+
+#if defined(USE_CUDA)
+    if (is_cuda_available() && gpu_w1.is_allocated() && gpu_w2.is_allocated() && act && act->hidden_seq.size() == T) {
+        auto grad_activated = gpu_w2.gemm_sequence_transpose(seq_output_grad);
+
+        if (lr > 0.0f) {
+            auto dW2 = gpu_w2.gemm_sequence_weight_grad(seq_output_grad, act->activated_seq);
+            for (size_t i = 0; i < weight2.size() && i < dW2.size(); ++i) {
+                for (size_t j = 0; j < weight2[i].size() && j < dW2[i].size(); ++j) {
+                    float grad = std::max(-1.0f, std::min(1.0f, dW2[i][j]));
+                    weight2[i][j] -= lr * grad;
+                }
+            }
+        }
+
+        static const float kSqrt2OverPi = std::sqrt(2.0f / 3.14159265f);
+        int hd = hidden_dim;
+        std::vector<std::vector<float>> grad_hidden(T, std::vector<float>(hd, 0.0f));
+        for (size_t t = 0; t < T; ++t) {
+            const auto& hidden = act->hidden_seq[t];
+            for (int i = 0; i < hd && i < static_cast<int>(hidden.size()); ++i) {
+                float x_val  = hidden[i];
+                float inner  = kSqrt2OverPi * (x_val + 0.044715f * x_val * x_val * x_val);
+                float tv     = std::tanh(inner);
+                float sech2  = 1.0f - tv * tv;
+                float gelu_deriv = 0.5f * (1.0f + tv) + 0.5f * x_val * sech2 * kSqrt2OverPi * (1.0f + 3.0f * 0.044715f * x_val * x_val);
+                float gh = gelu_deriv * grad_activated[t][i];
+                if (act && !act->dropout_mask.empty() && t < act->dropout_mask.size() && i < static_cast<int>(act->dropout_mask[t].size())) {
+                    gh *= act->dropout_mask[t][i];
+                }
+                grad_hidden[t][i] = (std::isnan(gh) || std::isinf(gh)) ? 0.0f : gh;
+            }
+        }
+
+        seq_grad_x = gpu_w1.gemm_sequence_transpose(grad_hidden);
+
+        if (lr > 0.0f) {
+            auto dW1 = gpu_w1.gemm_sequence_weight_grad(grad_hidden, seq_x);
+            for (size_t i = 0; i < weight1.size() && i < dW1.size(); ++i) {
+                for (size_t j = 0; j < weight1[i].size() && j < dW1[i].size(); ++j) {
+                    float grad = std::max(-1.0f, std::min(1.0f, dW1[i][j]));
+                    weight1[i][j] -= lr * grad;
+                }
+            }
+        }
+
+        return;
+    }
+#endif
+
+    seq_grad_x.resize(T);
+    for (size_t t = 0; t < T; ++t) {
+        backward_and_update(seq_x[t], seq_output_grad[t], lr, seq_grad_x[t], act, t);
+    }
+}
+
 } // namespace matmul_free

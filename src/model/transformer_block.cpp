@@ -158,13 +158,12 @@ void TransformerBlock::backward_and_update(const std::vector<std::vector<float>>
     const auto& norm_residual = *norm_residual_ptr;
 
     size_t num_tokens = inputs.size();
-    std::vector<std::vector<float>> grad_after_residual(num_tokens, std::vector<float>(input_dim, 0.0f));
+    std::vector<std::vector<float>> ffn_grads_in;
+    ffn.backward_and_update_sequence(norm_residual, output_grads, lr, ffn_grads_in, act ? &act->ffn_act : nullptr);
 
+    std::vector<std::vector<float>> grad_after_residual(num_tokens, std::vector<float>(input_dim, 0.0f));
     for (size_t i = 0; i < num_tokens && i < output_grads.size(); ++i) {
-        std::vector<float> ffn_grad_in;
-        ffn.backward_and_update(norm_residual[i], output_grads[i], lr, ffn_grad_in, act ? &act->ffn_act : nullptr, i);
-        
-        std::vector<float> ffn_grad_presub = rmsnorm_backward(after_residual[i], ffn_grad_in);
+        std::vector<float> ffn_grad_presub = rmsnorm_backward(after_residual[i], i < ffn_grads_in.size() ? ffn_grads_in[i] : std::vector<float>(input_dim, 0.0f));
 
         for (int d = 0; d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
             grad_after_residual[i][d] = output_grads[i][d] + (d < static_cast<int>(ffn_grad_presub.size()) ? ffn_grad_presub[d] : 0.0f);

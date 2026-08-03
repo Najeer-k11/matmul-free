@@ -226,6 +226,105 @@ std::vector<std::vector<float>> GpuMatrix::gemm_sequence(
     return result;
 }
 
+std::vector<std::vector<float>> GpuMatrix::gemm_sequence_transpose(const std::vector<std::vector<float>>& seq_grad) const {
+    if (!d_ptr || seq_grad.empty()) return {};
+
+    int T = static_cast<int>(seq_grad.size());
+    int N = rows;
+    int K = cols;
+
+    std::vector<float> flat_grad(T * N, 0.0f);
+    for (int t = 0; t < T; ++t) {
+        int lim = static_cast<int>(seq_grad[t].size());
+        for (int n = 0; n < N && n < lim; ++n)
+            flat_grad[t * N + n] = seq_grad[t][n];
+    }
+
+    float* d_in = ScratchBufferManager::instance().get_float_in(static_cast<size_t>(T) * N);
+    float* d_out = ScratchBufferManager::instance().get_float_out(static_cast<size_t>(T) * K);
+    cudaMemset(d_out, 0, static_cast<size_t>(T) * K * sizeof(float));
+    cudaMemcpy(d_in, flat_grad.data(), flat_grad.size() * sizeof(float), cudaMemcpyHostToDevice);
+
+    cublasHandle_t handle = get_cublas_handle();
+    if (handle) {
+        const float alpha = 1.0f, beta = 0.0f;
+        cublasSgemm(handle,
+                    CUBLAS_OP_N,
+                    CUBLAS_OP_N,
+                    K, T, N,
+                    &alpha,
+                    d_ptr, K,
+                    d_in,  N,
+                    &beta,
+                    d_out, K);
+        cudaDeviceSynchronize();
+    }
+
+    std::vector<float> flat_out(static_cast<size_t>(T) * K);
+    cudaMemcpy(flat_out.data(), d_out, flat_out.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    std::vector<std::vector<float>> result(T, std::vector<float>(K));
+    for (int t = 0; t < T; ++t)
+        for (int k = 0; k < K; ++k)
+            result[t][k] = flat_out[t * K + k];
+
+    return result;
+}
+
+std::vector<std::vector<float>> GpuMatrix::gemm_sequence_weight_grad(const std::vector<std::vector<float>>& seq_grad,
+                                                                      const std::vector<std::vector<float>>& seq_input) const {
+    if (seq_grad.empty() || seq_input.empty()) return {};
+
+    int T = static_cast<int>(seq_grad.size());
+    int N = rows;
+    int K = cols;
+
+    std::vector<float> flat_grad(T * N, 0.0f);
+    std::vector<float> flat_in(T * K, 0.0f);
+    for (int t = 0; t < T; ++t) {
+        int lim_g = static_cast<int>(seq_grad[t].size());
+        for (int n = 0; n < N && n < lim_g; ++n)
+            flat_grad[t * N + n] = seq_grad[t][n];
+
+        int lim_i = static_cast<int>(seq_input[t].size());
+        for (int k = 0; k < K && k < lim_i; ++k)
+            flat_in[t * K + k] = seq_input[t][k];
+    }
+
+    float* d_in = ScratchBufferManager::instance().get_float_in(static_cast<size_t>(T) * K);
+    float* d_grad = ScratchBufferManager::instance().get_float_out(static_cast<size_t>(T) * N);
+    float* d_dW = ScratchBufferManager::instance().get_float_weight(static_cast<size_t>(N) * K);
+    cudaMemset(d_dW, 0, static_cast<size_t>(N) * K * sizeof(float));
+
+    cudaMemcpy(d_in, flat_in.data(), flat_in.size() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_grad, flat_grad.data(), flat_grad.size() * sizeof(float), cudaMemcpyHostToDevice);
+
+    cublasHandle_t handle = get_cublas_handle();
+    if (handle) {
+        const float alpha = 1.0f, beta = 0.0f;
+        cublasSgemm(handle,
+                    CUBLAS_OP_N,
+                    CUBLAS_OP_T,
+                    K, N, T,
+                    &alpha,
+                    d_in,   K,
+                    d_grad, N,
+                    &beta,
+                    d_dW,   K);
+        cudaDeviceSynchronize();
+    }
+
+    std::vector<float> flat_dW(static_cast<size_t>(N) * K);
+    cudaMemcpy(flat_dW.data(), d_dW, flat_dW.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    std::vector<std::vector<float>> result(N, std::vector<float>(K));
+    for (int n = 0; n < N; ++n)
+        for (int k = 0; k < K; ++k)
+            result[n][k] = flat_dW[n * K + k];
+
+    return result;
+}
+
 } // namespace matmul_free
 
 #endif // USE_CUDA

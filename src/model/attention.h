@@ -15,6 +15,7 @@ struct AttentionActivations {
         std::vector<std::vector<float>> all_weights;
     };
     std::vector<HeadActivations> heads;
+    std::vector<std::vector<float>> dropout_mask;
 };
 
 /**

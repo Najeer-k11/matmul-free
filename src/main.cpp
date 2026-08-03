@@ -146,17 +146,18 @@ void run_demo_suite(LanguageModel& model, BPETokenizer& bpe) {
 
 int main(int argc, char** argv) {
     ModelConfig config;
-    config.hidden_dim = 512;          // Scaled to 512 hidden dimension
-    config.num_heads = 8;             // Scaled to 8 attention heads
-    config.num_layers = 6;            // Scaled to 6 transformer layers
-    config.max_seq_len = 256;         // Scaled to 256 max sequence length
+    config.hidden_dim = 64;           // Sane default for 14KB demo corpus
+    config.num_heads = 4;             // 4 attention heads (head_dim = 16)
+    config.num_layers = 2;            // 2 transformer layers
+    config.max_seq_len = 256;         // Max sequence length
 
     std::string mode = "chat";
     std::string prompt = "once upon a time";
     std::string corpus_file = "corpus.txt";
-    int epochs = 80;
+    int epochs = 60;
     int max_len = 35;
-    int vocab_size = 1024;
+    int vocab_size = 256;
+    int patience = 8;
     float temp = 0.7f;
     float lr = -1.0f;
     bool use_bitlinear = false;
@@ -171,6 +172,8 @@ int main(int argc, char** argv) {
             corpus_file = argv[++i];
         } else if (arg == "--epochs" && i + 1 < argc) {
             epochs = std::stoi(argv[++i]);
+        } else if (arg == "--patience" && i + 1 < argc) {
+            patience = std::stoi(argv[++i]);
         } else if (arg == "--lr" && i + 1 < argc) {
             lr = std::stof(argv[++i]);
         } else if (arg == "--hidden-dim" && i + 1 < argc) {
@@ -193,7 +196,7 @@ int main(int argc, char** argv) {
     }
 
     if (lr < 0.0f) {
-        lr = (config.hidden_dim > 256) ? 0.002f : 0.025f;
+        lr = 0.002f;
     }
 
     LanguageModel model(config);
@@ -252,11 +255,33 @@ int main(int argc, char** argv) {
     }
 
     if (mode == "train") {
-        std::cout << ">> Starting AdamW training on corpus '" << corpus_file << "' (" << epochs << " epochs, LR: " << lr << ", " << vocab_size << " vocab target)...\n";
         auto corpus = load_corpus(corpus_file);
         bpe.build_vocab_from_corpus(corpus, vocab_size);
         model.resize_vocab(bpe.vocab_size());
-        model.train(corpus, epochs, lr, false, &bpe);
+
+        size_t total_tokens = 0;
+        for (const auto& text : corpus) {
+            total_tokens += bpe.encode(text, true).size();
+        }
+
+        size_t h = config.hidden_dim;
+        size_t v = bpe.vocab_size();
+        size_t l = config.num_layers;
+        size_t est_params = 2 * v * h + l * (11 * h * h);
+        float params_per_token = total_tokens > 0 ? static_cast<float>(est_params) / static_cast<float>(total_tokens) : 0.0f;
+
+        std::cout << ">> Starting AdamW training on corpus '" << corpus_file << "' (" << epochs << " epochs, LR: " << lr << ", " << vocab_size << " vocab target)...\n";
+        std::cout << "   [Model Size: ~" << (est_params / 1000) << "K Params | Hidden Dim: " << config.hidden_dim
+                  << " | Layers: " << config.num_layers << " | Heads: " << config.num_heads << "]\n";
+
+        if (params_per_token > 200.0f) {
+            std::cout << "\n[WARNING] Model has ~" << est_params << " params but the corpus tokenizes to only ~" << total_tokens
+                      << " tokens (~" << static_cast<int>(params_per_token) << " params/token).\n"
+                      << "          This is far into memorization territory — expect the model to memorize the corpus rather than generalize.\n"
+                      << "          Consider a smaller --hidden-dim/--layers or a larger --corpus.\n\n";
+        }
+
+        model.train(corpus, epochs, lr, false, &bpe, patience);
         model.save_model("model_checkpoint.bin");
         std::cout << ">> Training complete! Checkpoint saved to 'model_checkpoint.bin'.\n";
         return 0;

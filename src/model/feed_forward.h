@@ -9,6 +9,7 @@ namespace matmul_free {
 struct FFNActivations {
     std::vector<std::vector<float>> hidden_seq;
     std::vector<std::vector<float>> activated_seq;
+    std::vector<std::vector<float>> dropout_mask;
 };
 
 /**
@@ -74,6 +75,11 @@ struct FFN {
                              std::vector<float>& grad_x,
                              const FFNActivations* act = nullptr,
                              size_t token_idx = 0);
+    void backward_and_update_sequence(const std::vector<std::vector<float>>& seq_x,
+                                      const std::vector<std::vector<float>>& seq_output_grad,
+                                      float lr,
+                                      std::vector<std::vector<float>>& seq_grad_x,
+                                      const FFNActivations* act = nullptr);
     void backward(std::vector<float>& grad_x, const std::vector<float>& output_grad);
 };
 

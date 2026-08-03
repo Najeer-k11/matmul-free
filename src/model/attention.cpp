@@ -419,6 +419,17 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
     input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
     if (num_tokens == 0 || num_heads == 0) return;
 
+    std::vector<std::vector<float>> output_grads_dropped = output_grads;
+    if (act != nullptr && !act->dropout_mask.empty()) {
+        for (size_t i = 0; i < output_grads_dropped.size(); ++i) {
+            for (size_t d = 0; d < output_grads_dropped[i].size(); ++d) {
+                if (i < act->dropout_mask.size() && d < act->dropout_mask[i].size()) {
+                    output_grads_dropped[i][d] *= act->dropout_mask[i][d];
+                }
+            }
+        }
+    }
+
     for (int h = 0; h < num_heads; ++h) {
         int head_dim = static_cast<int>(query_weights[h].size());
         float scale  = head_dim > 0 ? 1.0f / std::sqrt(static_cast<float>(head_dim)) : 1.0f;
@@ -471,10 +482,10 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
         std::vector<std::vector<float>> grad_q(num_tokens, std::vector<float>(head_dim, 0.0f));
         std::vector<std::vector<float>> grad_k(num_tokens, std::vector<float>(head_dim, 0.0f));
 
-        for (int i = 0; i < num_tokens && i < static_cast<int>(output_grads.size()); ++i) {
+        for (int i = 0; i < num_tokens && i < static_cast<int>(output_grads_dropped.size()); ++i) {
             std::vector<float> grad_head_out(head_dim, 0.0f);
-            for (int d = 0; d < head_dim && d < input_dim && d < static_cast<int>(output_grads[i].size()); ++d) {
-                grad_head_out[d] = output_grads[i][d] / static_cast<float>(num_heads);
+            for (int d = 0; d < head_dim && d < input_dim && d < static_cast<int>(output_grads_dropped[i].size()); ++d) {
+                grad_head_out[d] = output_grads_dropped[i][d] / static_cast<float>(num_heads);
             }
 
             std::vector<float> grad_A(i + 1, 0.0f);
@@ -505,6 +516,42 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
             grad_pre_q[i] = apply_rope(grad_q[i], -i, head_dim);
             grad_pre_k[i] = apply_rope(grad_k[i], -i, head_dim);
         }
+
+#if defined(USE_CUDA)
+        if (is_cuda_available() && h < static_cast<int>(gpu_query_weights.size()) && gpu_query_weights[h].is_allocated()) {
+            if (lr > 0.0f) {
+                auto dW_q = gpu_query_weights[h].gemm_sequence_weight_grad(grad_pre_q, inputs);
+                auto dW_k = gpu_key_weights[h].gemm_sequence_weight_grad(grad_pre_k, inputs);
+                auto dW_v = gpu_value_weights[h].gemm_sequence_weight_grad(grad_v, inputs);
+
+                for (int r = 0; r < head_dim && r < static_cast<int>(dW_q.size()); ++r) {
+                    for (int c = 0; c < input_dim && c < static_cast<int>(dW_q[r].size()); ++c) {
+                        float dq = std::max(-1.0f, std::min(1.0f, dW_q[r][c]));
+                        float dk = std::max(-1.0f, std::min(1.0f, dW_k[r][c]));
+                        float dv = std::max(-1.0f, std::min(1.0f, dW_v[r][c]));
+                        query_weights[h][r][c] -= lr * dq;
+                        key_weights[h][r][c]   -= lr * dk;
+                        value_weights[h][r][c] -= lr * dv;
+                    }
+                }
+            }
+
+            auto in_g_q = gpu_query_weights[h].gemm_sequence_transpose(grad_pre_q);
+            auto in_g_k = gpu_key_weights[h].gemm_sequence_transpose(grad_pre_k);
+            auto in_g_v = gpu_value_weights[h].gemm_sequence_transpose(grad_v);
+
+            for (int i = 0; i < num_tokens; ++i) {
+                auto& in_g = input_grads[i];
+                for (int c = 0; c < input_dim && c < static_cast<int>(in_g_q[i].size()); ++c) {
+                    float acc = in_g_q[i][c] + in_g_k[i][c] + in_g_v[i][c];
+                    if (!std::isnan(acc) && !std::isinf(acc)) {
+                        in_g[c] += acc;
+                    }
+                }
+            }
+            continue;
+        }
+#endif
 
         #pragma omp parallel for if(num_tokens > 4)
         for (int i = 0; i < num_tokens; ++i) {

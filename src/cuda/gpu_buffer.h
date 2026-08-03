@@ -148,6 +148,19 @@ struct GpuMatrix {
      */
     std::vector<std::vector<float>> gemm_sequence(const std::vector<std::vector<float>>& seq_input) const;
 
+    /**
+     * Batched sequence GEMM transpose: computes Out[T x cols] = Grad[T x rows] * W
+     * Used in backward pass to propagate gradients from output to input features.
+     */
+    std::vector<std::vector<float>> gemm_sequence_transpose(const std::vector<std::vector<float>>& seq_grad) const;
+
+    /**
+     * Batched sequence weight gradient GEMM: computes dW[rows x cols] = Grad^T[rows x T] * Input[T x cols]
+     * Used in backward pass to compute parameter weight gradients across a sequence.
+     */
+    std::vector<std::vector<float>> gemm_sequence_weight_grad(const std::vector<std::vector<float>>& seq_grad,
+                                                              const std::vector<std::vector<float>>& seq_input) const;
+
     bool is_allocated() const { return d_ptr != nullptr; }
 };
 

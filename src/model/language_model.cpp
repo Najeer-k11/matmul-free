@@ -139,12 +139,19 @@ void LanguageModel::clip_grad_norm(std::vector<std::vector<float>>& grads, float
 
 void LanguageModel::train(const std::vector<std::string>& training_data, 
                            int epochs, float initial_learning_rate, bool use_qat,
-                           const BPETokenizer* bpe) {
+                           const BPETokenizer* bpe, int patience) {
+    if (training_data.empty()) {
+        std::cout << "Error: Training data is empty.\n";
+        return;
+    }
+
+    std::cout << ">> Initializing training sequence with " << training_data.size() << " samples...\n";
+
 #if defined(USE_CUDA)
     if (is_cuda_available()) {
         std::cout << "  [CUDA GPU Acceleration: ACTIVE (NVIDIA GeForce RTX 4060 Target)]\n";
     } else {
-        std::cout << "  [OpenMP Multi-Threading: ENABLED]\n";
+        std::cout << "  [CUDA GPU Acceleration: INACTIVE (Fallback to CPU)]\n";
     }
 #else
     if (is_openmp_accelerated()) {
@@ -161,8 +168,10 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
 
     timing::g_stats.reset();
 
+    float best_val_loss = 1e9f;
     float best_train_loss = 1e9f;
     int best_epoch = 0;
+    int no_improve_epochs = 0;
     auto best_embeddings = token_embeddings;
     auto best_blocks = transformer_blocks;
     auto best_vocab = vocab_projection;
@@ -296,18 +305,10 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             }
             adamw_emb.update(token_embeddings, emb_grads, current_lr, adamw_step);
 
-#if defined(USE_CUDA)
-            if (is_cuda_available() && ((sample_idx + 1) % sync_interval == 0 || sample_idx + 1 == train_set.size())) {
-                for (auto& block : transformer_blocks) {
-                    block.upload_to_gpu();
-                }
-            }
-#endif
-
             if (sample_idx % 4 == 0 || sample_idx + 1 == train_set.size()) {
                 float batch_pct = ((sample_idx + 1) * 100.0f) / static_cast<float>(total_sentences);
-                float curr_avg = train_samples > 0 ? total_train_loss / train_samples : 0.0f;
-                std::cout << "\r  [Epoch " << std::setw(2) << (epoch + 1) << "/" << epochs
+                float curr_avg = total_train_loss / static_cast<float>(sample_idx + 1);
+                std::cout << "\r  [Epoch " << std::setw(2) << (epoch + 1) << "/" << epochs 
                           << " | Batch " << std::setw(3) << (sample_idx + 1) << "/" << total_sentences
                           << " (" << std::setw(3) << static_cast<int>(batch_pct) << "%)] "
                           << "Loss: " << std::fixed << std::setprecision(4) << curr_avg << " " << std::flush;
@@ -340,12 +341,16 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         float avg_val_loss = val_samples > 0 ? total_val_loss / val_samples : avg_train_loss;
         float epoch_pct = ((epoch + 1) * 100.0f) / static_cast<float>(epochs);
 
-        if (avg_train_loss < best_train_loss) {
+        if (avg_val_loss < best_val_loss) {
+            best_val_loss = avg_val_loss;
             best_train_loss = avg_train_loss;
             best_epoch = epoch + 1;
             best_embeddings = token_embeddings;
             best_blocks = transformer_blocks;
             best_vocab = vocab_projection;
+            no_improve_epochs = 0;
+        } else {
+            no_improve_epochs++;
         }
 
         std::cout << "\r  [Epoch " << std::setw(2) << (epoch + 1) << "/" << epochs 
@@ -356,6 +361,13 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         if ((epoch + 1) % 10 == 0) {
             std::string sample = generate("the ", 12, 0.5f, 3, 0.85f, use_qat, bpe);
             std::cout << "     >> Sample Gen [Epoch " << (epoch + 1) << "]: \"" << sample << "\"\n";
+        }
+
+        if (patience > 0 && no_improve_epochs >= patience) {
+            std::cout << "  >> Early stopping triggered! Validation loss did not improve for " 
+                      << patience << " consecutive epochs (Best Epoch " << best_epoch 
+                      << " | Val Loss: " << std::fixed << std::setprecision(4) << best_val_loss << ").\n";
+            break;
         }
 
         if (avg_train_loss > prev_epoch_loss && epoch > 5) {
@@ -381,7 +393,8 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
     transformer_blocks = best_blocks;
     vocab_projection = best_vocab;
     std::cout << "  >> Restored best model checkpoint from Epoch " << best_epoch 
-              << " (Train Loss: " << std::setprecision(4) << best_train_loss << ")!\n";
+              << " (Val Loss: " << std::fixed << std::setprecision(4) << best_val_loss 
+              << " | Train Loss: " << best_train_loss << ")!\n";
     timing::print_summary();
 }
 

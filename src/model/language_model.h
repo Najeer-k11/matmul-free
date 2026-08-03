@@ -26,7 +26,7 @@ public:
 
     void train(const std::vector<std::string>& training_data, 
                int epochs = 50, float initial_learning_rate = 0.025f, bool use_qat = false,
-               const BPETokenizer* bpe = nullptr);
+               const BPETokenizer* bpe = nullptr, int patience = 8);
 
     std::string generate(const std::string& input_text, int max_length = 20,
                          float temperature = 1.0f, int top_k = 0, float top_p = 1.0f,
