@@ -7,6 +7,16 @@
 
 namespace matmul_free {
 
+struct AttentionActivations {
+    struct HeadActivations {
+        std::vector<std::vector<float>> all_q;
+        std::vector<std::vector<float>> all_k;
+        std::vector<std::vector<float>> all_v;
+        std::vector<std::vector<float>> all_weights;
+    };
+    std::vector<HeadActivations> heads;
+};
+
 /**
  * Multi-head causal self-attention layer.
  * When USE_CUDA is defined, Q/K/V weight matrices are stored GPU-resident
@@ -62,8 +72,10 @@ struct AttentionLayer {
     /** Download GPU weights back to CPU (for save/load). */
     void download_from_gpu();
 
-    std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs) const;
-    std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs) const;
+    std::vector<std::vector<float>> forward(const std::vector<std::vector<float>>& inputs,
+                                           AttentionActivations* act = nullptr) const;
+    std::vector<std::vector<float>> forward_bitlinear(const std::vector<std::vector<float>>& inputs,
+                                                     AttentionActivations* act = nullptr) const;
     std::vector<std::vector<float>> forward_cached(const std::vector<std::vector<float>>& inputs,
                                                    LayerKVCache& cache,
                                                    int start_pos = 0) const;
@@ -73,7 +85,8 @@ struct AttentionLayer {
     void backward_and_update(const std::vector<std::vector<float>>& inputs,
                              const std::vector<std::vector<float>>& output_grads,
                              float lr,
-                             std::vector<std::vector<float>>& input_grads);
+                             std::vector<std::vector<float>>& input_grads,
+                             const AttentionActivations* act = nullptr);
     void backward(std::vector<std::vector<float>>& input_grads, 
                   const std::vector<std::vector<float>>& output_grads);
 };

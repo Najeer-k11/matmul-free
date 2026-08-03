@@ -1,6 +1,7 @@
 #include "language_model.h"
 #include "adamw.h"
 #include "../core/math_ops.h"
+#include "../core/timing.h"
 #include "../sampling/sampling.h"
 #include "../benchmark/benchmark.h"
 #include "../quantization/ternary.h"
@@ -158,6 +159,8 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
     std::vector<std::string> train_set(training_data.begin(), training_data.begin() + train_size);
     std::vector<std::string> val_set(training_data.begin() + train_size, training_data.end());
 
+    timing::g_stats.reset();
+
     float best_train_loss = 1e9f;
     int best_epoch = 0;
     auto best_embeddings = token_embeddings;
@@ -172,6 +175,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
     int worsening_streak = 0;
 
     for (int epoch = 0; epoch < epochs; ++epoch) {
+        timing::ScopedTimerAccumulator epoch_timer(timing::g_stats.total_epoch_time_ms);
         float current_lr = initial_learning_rate * (1.0f - static_cast<float>(epoch) / static_cast<float>(epochs));
         if (current_lr < 0.0001f) current_lr = 0.0001f;
 
@@ -188,6 +192,8 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
         int train_samples = 0;
         int total_sentences = static_cast<int>(train_set.size());
         
+        constexpr int sync_interval = 16;
+
         for (size_t sample_idx = 0; sample_idx < train_set.size(); ++sample_idx) {
             const auto& text = train_set[sample_idx];
             std::vector<int> tokens = bpe != nullptr ? bpe->encode(text, true) : tokenize_text(text, static_cast<int>(token_embeddings.size()));
@@ -204,10 +210,15 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             }
 
             std::vector<std::vector<std::vector<float>>> layer_inputs(transformer_blocks.size());
+            std::vector<BlockActivations> layer_activations(transformer_blocks.size());
             std::vector<std::vector<float>> seq = input_seq;
-            for (size_t b = 0; b < transformer_blocks.size(); ++b) {
-                layer_inputs[b] = seq;
-                seq = use_qat ? transformer_blocks[b].forward_bitlinear(seq) : transformer_blocks[b].forward(seq);
+            {
+                timing::ScopedTimerAccumulator forward_timer(timing::g_stats.forward_time_ms);
+                for (size_t b = 0; b < transformer_blocks.size(); ++b) {
+                    layer_inputs[b] = seq;
+                    seq = use_qat ? transformer_blocks[b].forward_bitlinear(seq, &layer_activations[b])
+                                  : transformer_blocks[b].forward(seq, &layer_activations[b]);
+                }
             }
             
             float loss = compute_loss(seq, tokens);
@@ -267,7 +278,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             std::vector<std::vector<float>> curr_grads = hidden_grads;
             for (int b = static_cast<int>(transformer_blocks.size()) - 1; b >= 0; --b) {
                 std::vector<std::vector<float>> next_grads;
-                transformer_blocks[b].backward_and_update(layer_inputs[b], curr_grads, current_lr, next_grads);
+                transformer_blocks[b].backward_and_update(layer_inputs[b], curr_grads, current_lr, next_grads, &layer_activations[b]);
                 curr_grads = next_grads;
             }
 
@@ -284,6 +295,14 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
                 }
             }
             adamw_emb.update(token_embeddings, emb_grads, current_lr, adamw_step);
+
+#if defined(USE_CUDA)
+            if (is_cuda_available() && ((sample_idx + 1) % sync_interval == 0 || sample_idx + 1 == train_set.size())) {
+                for (auto& block : transformer_blocks) {
+                    block.upload_to_gpu();
+                }
+            }
+#endif
 
             if (sample_idx % 4 == 0 || sample_idx + 1 == train_set.size()) {
                 float batch_pct = ((sample_idx + 1) * 100.0f) / static_cast<float>(total_sentences);
@@ -363,6 +382,7 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
     vocab_projection = best_vocab;
     std::cout << "  >> Restored best model checkpoint from Epoch " << best_epoch 
               << " (Train Loss: " << std::setprecision(4) << best_train_loss << ")!\n";
+    timing::print_summary();
 }
 
 std::string LanguageModel::generate(const std::string& input_text, int max_length,

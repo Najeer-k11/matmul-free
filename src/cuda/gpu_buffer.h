@@ -17,6 +17,88 @@ namespace matmul_free {
 cublasHandle_t get_cublas_handle();
 
 /**
+ * Singleton scratch buffer manager for persistent, reusable GPU device memory allocations.
+ */
+class ScratchBufferManager {
+public:
+    static ScratchBufferManager& instance() {
+        static ScratchBufferManager mgr;
+        return mgr;
+    }
+
+    float* get_float_in(size_t count) {
+        if (count > cap_in_float_) {
+            if (d_in_float_) cudaFree(d_in_float_);
+            cap_in_float_ = count * 2;
+            cudaMalloc(&d_in_float_, cap_in_float_ * sizeof(float));
+        }
+        return d_in_float_;
+    }
+
+    float* get_float_out(size_t count) {
+        if (count > cap_out_float_) {
+            if (d_out_float_) cudaFree(d_out_float_);
+            cap_out_float_ = count * 2;
+            cudaMalloc(&d_out_float_, cap_out_float_ * sizeof(float));
+        }
+        return d_out_float_;
+    }
+
+    float* get_float_weight(size_t count) {
+        if (count > cap_w_float_) {
+            if (d_w_float_) cudaFree(d_w_float_);
+            cap_w_float_ = count * 2;
+            cudaMalloc(&d_w_float_, cap_w_float_ * sizeof(float));
+        }
+        return d_w_float_;
+    }
+
+    int8_t* get_int8_weight(size_t count) {
+        if (count > cap_w_int8_) {
+            if (d_w_int8_) cudaFree(d_w_int8_);
+            cap_w_int8_ = count * 2;
+            cudaMalloc(&d_w_int8_, cap_w_int8_ * sizeof(int8_t));
+        }
+        return d_w_int8_;
+    }
+
+    uint8_t* get_uint8_weight(size_t count) {
+        if (count > cap_w_uint8_) {
+            if (d_w_uint8_) cudaFree(d_w_uint8_);
+            cap_w_uint8_ = count * 2;
+            cudaMalloc(&d_w_uint8_, cap_w_uint8_ * sizeof(uint8_t));
+        }
+        return d_w_uint8_;
+    }
+
+    ~ScratchBufferManager() {
+        if (d_in_float_)  cudaFree(d_in_float_);
+        if (d_out_float_) cudaFree(d_out_float_);
+        if (d_w_float_)   cudaFree(d_w_float_);
+        if (d_w_int8_)    cudaFree(d_w_int8_);
+        if (d_w_uint8_)   cudaFree(d_w_uint8_);
+    }
+
+private:
+    ScratchBufferManager() = default;
+
+    float* d_in_float_ = nullptr;
+    size_t cap_in_float_ = 0;
+
+    float* d_out_float_ = nullptr;
+    size_t cap_out_float_ = 0;
+
+    float* d_w_float_ = nullptr;
+    size_t cap_w_float_ = 0;
+
+    int8_t* d_w_int8_ = nullptr;
+    size_t cap_w_int8_ = 0;
+
+    uint8_t* d_w_uint8_ = nullptr;
+    size_t cap_w_uint8_ = 0;
+};
+
+/**
  * RAII GPU device matrix. Stores a flat row-major float array on GPU VRAM.
  * Use to_device() to upload from CPU, from_device() to download to CPU.
  * gemv() computes y = W * x using cuBLAS (all on GPU).

@@ -1,5 +1,6 @@
 #include "feed_forward.h"
 #include "../core/math_ops.h"
+#include "../core/timing.h"
 #include "../quantization/ternary.h"
 #include "../cuda/gpu_buffer.h"
 #include "../cuda/gpu_ops.h"
@@ -49,22 +50,35 @@ std::vector<float> FFN::forward(const std::vector<float>& x) const {
  * Batched forward: process entire sequence [T tokens] in one cuBLAS SGEMM.
  * Called by TransformerBlock::forward to avoid T round-trips on per-token gemv.
  */
-std::vector<std::vector<float>> FFN::forward_sequence(const std::vector<std::vector<float>>& seq) const {
+std::vector<std::vector<float>> FFN::forward_sequence(const std::vector<std::vector<float>>& seq, FFNActivations* act) const {
 #if defined(USE_CUDA)
-    if (gpu_w1.is_allocated() && gpu_w2.is_allocated()) {
-        // W1 * seq^T  → hidden [T x hidden_dim]
+    if (!gpu_dirty && gpu_w1.is_allocated() && gpu_w2.is_allocated()) {
         std::vector<std::vector<float>> hidden_seq = gpu_w1.gemm_sequence(seq);
-        // GELU per-element
-        for (auto& row : hidden_seq)
+        std::vector<std::vector<float>> activated_seq = hidden_seq;
+        for (auto& row : activated_seq)
             for (auto& v : row) v = gelu(v);
-        // W2 * hidden^T → output [T x input_dim]
-        return gpu_w2.gemm_sequence(hidden_seq);
+        auto out = gpu_w2.gemm_sequence(activated_seq);
+        if (act) {
+            act->hidden_seq = std::move(hidden_seq);
+            act->activated_seq = std::move(activated_seq);
+        }
+        return out;
     }
 #endif
-    // CPU fallback: call per-token
     std::vector<std::vector<float>> out(seq.size());
-    for (size_t t = 0; t < seq.size(); ++t)
-        out[t] = forward(seq[t]);
+    std::vector<std::vector<float>> hidden_seq(seq.size());
+    std::vector<std::vector<float>> activated_seq(seq.size());
+    for (size_t t = 0; t < seq.size(); ++t) {
+        hidden_seq[t] = matmul_vector(weight1, seq[t]);
+        activated_seq[t].resize(hidden_seq[t].size());
+        for (size_t i = 0; i < hidden_seq[t].size(); ++i)
+            activated_seq[t][i] = gelu(hidden_seq[t][i]);
+        out[t] = matmul_vector(weight2, activated_seq[t]);
+    }
+    if (act) {
+        act->hidden_seq = std::move(hidden_seq);
+        act->activated_seq = std::move(activated_seq);
+    }
     return out;
 }
 
@@ -117,33 +131,56 @@ std::vector<std::vector<float>> FFN::forward_bitlinear_sequence(const std::vecto
 
 // ── Backward ────────────────────────────────────────────────────────────────
 
-void FFN::backward_and_update(const std::vector<float>& x, const std::vector<float>& output_grad, float lr, std::vector<float>& grad_x) {
+void FFN::backward_and_update(const std::vector<float>& x,
+                             const std::vector<float>& output_grad,
+                             float lr,
+                             std::vector<float>& grad_x,
+                             const FFNActivations* act,
+                             size_t token_idx) {
+    timing::ScopedTimerAccumulator timer(timing::g_stats.backward_ffn_time_ms);
     int hd = static_cast<int>(weight1.size());
     if (hd == 0 || x.empty()) {
         grad_x.assign(input_dim, 0.0f);
         return;
     }
     
-    std::vector<float> hidden = matmul_vector(weight1, x);
-    std::vector<float> activated(hidden.size());
-    for (size_t i = 0; i < hidden.size(); ++i)
-        activated[i] = gelu(hidden[i]);
-
-    std::vector<float> grad_activated(hd, 0.0f);
-    for (int i = 0; i < hd; ++i) {
-        for (size_t j = 0; j < output_grad.size() && j < weight2.size(); ++j) {
-            if (i < static_cast<int>(weight2[j].size())) {
-                grad_activated[i] += weight2[j][i] * output_grad[j];
-            }
-        }
+    std::vector<float> hidden;
+    std::vector<float> activated;
+    if (act && token_idx < act->hidden_seq.size()) {
+        hidden = act->hidden_seq[token_idx];
+        activated = act->activated_seq[token_idx];
+    } else {
+        hidden = matmul_vector(weight1, x);
+        activated.resize(hidden.size());
+        for (size_t i = 0; i < hidden.size(); ++i)
+            activated[i] = gelu(hidden[i]);
     }
 
-    for (size_t i = 0; i < weight2.size() && i < output_grad.size(); ++i) {
-        for (size_t j = 0; j < weight2[i].size() && j < activated.size(); ++j) {
-            float grad = output_grad[i] * activated[j];
+    std::vector<float> grad_activated(hd, 0.0f);
+    #pragma omp parallel for if(hd > 32)
+    for (int i = 0; i < hd; ++i) {
+        float sum = 0.0f;
+        int lim = std::min(static_cast<int>(output_grad.size()), static_cast<int>(weight2.size()));
+        for (int j = 0; j < lim; ++j) {
+            if (i < static_cast<int>(weight2[j].size())) {
+                sum += weight2[j][i] * output_grad[j];
+            }
+        }
+        grad_activated[i] = sum;
+    }
+
+    #pragma omp parallel for if(weight2.size() > 16)
+    for (size_t i = 0; i < weight2.size(); ++i) {
+        if (i >= output_grad.size()) continue;
+        float og = output_grad[i];
+        if (og == 0.0f) continue;
+        auto& row = weight2[i];
+        size_t lim = std::min(row.size(), activated.size());
+        for (size_t j = 0; j < lim; ++j) {
+            float grad = og * activated[j];
             if (std::isnan(grad) || std::isinf(grad)) continue;
             grad = std::max(-1.0f, std::min(1.0f, grad));
-            weight2[i][j] -= lr * grad;
+            row[j] -= lr * grad;
         }
     }
 
@@ -160,6 +197,7 @@ void FFN::backward_and_update(const std::vector<float>& x, const std::vector<flo
     }
 
     grad_x.assign(input_dim, 0.0f);
+    #pragma omp parallel for if(input_dim > 32)
     for (int j = 0; j < input_dim; ++j) {
         float sum = 0.0f;
         for (int i = 0; i < hd; ++i) {
@@ -170,19 +208,20 @@ void FFN::backward_and_update(const std::vector<float>& x, const std::vector<flo
         grad_x[j] = (std::isnan(sum) || std::isinf(sum)) ? 0.0f : sum;
     }
 
-    for (size_t i = 0; i < weight1.size() && i < grad_hidden.size(); ++i) {
-        for (size_t j = 0; j < weight1[i].size() && j < x.size(); ++j) {
-            float grad = grad_hidden[i] * x[j];
+    #pragma omp parallel for if(weight1.size() > 16)
+    for (size_t i = 0; i < weight1.size(); ++i) {
+        if (i >= grad_hidden.size()) continue;
+        float gh = grad_hidden[i];
+        if (gh == 0.0f) continue;
+        auto& row = weight1[i];
+        size_t lim = std::min(row.size(), x.size());
+        for (size_t j = 0; j < lim; ++j) {
+            float grad = gh * x[j];
             if (std::isnan(grad) || std::isinf(grad)) continue;
             grad = std::max(-1.0f, std::min(1.0f, grad));
-            weight1[i][j] -= lr * grad;
+            row[j] -= lr * grad;
         }
     }
-
-    // Mark GPU weights as stale after CPU update — will re-upload next epoch
-#if defined(USE_CUDA)
-    gpu_dirty = true;
-#endif
 }
 
 void FFN::backward(std::vector<float>& grad_x, const std::vector<float>& output_grad) {

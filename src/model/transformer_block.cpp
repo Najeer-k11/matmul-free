@@ -13,12 +13,12 @@ void TransformerBlock::download_from_gpu() {
     ffn.download_from_gpu();
 }
 
-std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std::vector<float>>& inputs) {
+std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std::vector<float>>& inputs, BlockActivations* act) {
     std::vector<std::vector<float>> norm_inputs(inputs.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
         norm_inputs[i] = rmsnorm(inputs[i]);
     }
-    std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs);
+    std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs, act ? &act->attn_act : nullptr);
     
     std::vector<std::vector<float>> after_residual = inputs;
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -33,7 +33,7 @@ std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std:
         norm_residual[i] = rmsnorm(after_residual[i]);
 
     // Batched FFN: entire sequence in one GPU SGEMM call
-    std::vector<std::vector<float>> ffn_out_seq = ffn.forward_sequence(norm_residual);
+    std::vector<std::vector<float>> ffn_out_seq = ffn.forward_sequence(norm_residual, act ? &act->ffn_act : nullptr);
 
     std::vector<std::vector<float>> ff_output(after_residual.size());
     for (size_t i = 0; i < after_residual.size(); ++i) {
@@ -43,11 +43,19 @@ std::vector<std::vector<float>> TransformerBlock::forward(const std::vector<std:
             ff_output[i][j] = after_residual[i][j] + (j < ffn_out.size() ? ffn_out[j] : 0.0f);
         }
     }
+
+    if (act) {
+        act->norm_inputs = std::move(norm_inputs);
+        act->after_attention = std::move(after_attention);
+        act->after_residual = std::move(after_residual);
+        act->norm_residual = std::move(norm_residual);
+    }
     
     return ff_output;
 }
 
-std::vector<std::vector<float>> TransformerBlock::forward_bitlinear(const std::vector<std::vector<float>>& inputs) {
+std::vector<std::vector<float>> TransformerBlock::forward_bitlinear(const std::vector<std::vector<float>>& inputs, BlockActivations* act) {
+    (void)act;
     std::vector<std::vector<float>> norm_inputs(inputs.size());
     for (size_t i = 0; i < inputs.size(); ++i) {
         norm_inputs[i] = rmsnorm(inputs[i]);
@@ -115,26 +123,46 @@ std::vector<std::vector<float>> TransformerBlock::forward_cached(
 void TransformerBlock::backward_and_update(const std::vector<std::vector<float>>& inputs,
                          const std::vector<std::vector<float>>& output_grads,
                          float lr,
-                         std::vector<std::vector<float>>& input_grads) {
-    std::vector<std::vector<float>> norm_inputs(inputs.size());
-    for (size_t i = 0; i < inputs.size(); ++i) {
-        norm_inputs[i] = rmsnorm(inputs[i]);
-    }
-    std::vector<std::vector<float>> after_attention = attention.forward(norm_inputs);
-    std::vector<std::vector<float>> after_residual = inputs;
-    for (size_t i = 0; i < inputs.size(); ++i) {
-        for (size_t j = 0; j < inputs[i].size(); ++j) {
-            after_residual[i][j] += after_attention[i][j];
+                         std::vector<std::vector<float>>& input_grads,
+                         const BlockActivations* act) {
+    const std::vector<std::vector<float>>* norm_inputs_ptr = nullptr;
+    const std::vector<std::vector<float>>* after_residual_ptr = nullptr;
+    const std::vector<std::vector<float>>* norm_residual_ptr = nullptr;
+
+    std::vector<std::vector<float>> norm_inputs_local;
+    std::vector<std::vector<float>> after_residual_local;
+    std::vector<std::vector<float>> norm_residual_local;
+
+    if (act) {
+        norm_inputs_ptr = &act->norm_inputs;
+        after_residual_ptr = &act->after_residual;
+        norm_residual_ptr = &act->norm_residual;
+    } else {
+        norm_inputs_local.resize(inputs.size());
+        for (size_t i = 0; i < inputs.size(); ++i) norm_inputs_local[i] = rmsnorm(inputs[i]);
+        auto after_attention = attention.forward(norm_inputs_local);
+        after_residual_local = inputs;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            for (size_t j = 0; j < inputs[i].size(); ++j) after_residual_local[i][j] += after_attention[i][j];
         }
+        norm_residual_local.resize(after_residual_local.size());
+        for (size_t i = 0; i < after_residual_local.size(); ++i) norm_residual_local[i] = rmsnorm(after_residual_local[i]);
+
+        norm_inputs_ptr = &norm_inputs_local;
+        after_residual_ptr = &after_residual_local;
+        norm_residual_ptr = &norm_residual_local;
     }
+
+    const auto& norm_inputs = *norm_inputs_ptr;
+    const auto& after_residual = *after_residual_ptr;
+    const auto& norm_residual = *norm_residual_ptr;
 
     size_t num_tokens = inputs.size();
     std::vector<std::vector<float>> grad_after_residual(num_tokens, std::vector<float>(input_dim, 0.0f));
 
     for (size_t i = 0; i < num_tokens && i < output_grads.size(); ++i) {
-        std::vector<float> norm_res = rmsnorm(after_residual[i]);
         std::vector<float> ffn_grad_in;
-        ffn.backward_and_update(norm_res, output_grads[i], lr, ffn_grad_in);
+        ffn.backward_and_update(norm_residual[i], output_grads[i], lr, ffn_grad_in, act ? &act->ffn_act : nullptr, i);
         
         std::vector<float> ffn_grad_presub = rmsnorm_backward(after_residual[i], ffn_grad_in);
 
@@ -144,7 +172,7 @@ void TransformerBlock::backward_and_update(const std::vector<std::vector<float>>
     }
 
     std::vector<std::vector<float>> attn_grad_in;
-    attention.backward_and_update(norm_inputs, grad_after_residual, lr, attn_grad_in);
+    attention.backward_and_update(norm_inputs, grad_after_residual, lr, attn_grad_in, act ? &act->attn_act : nullptr);
 
     input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
     for (size_t i = 0; i < num_tokens; ++i) {

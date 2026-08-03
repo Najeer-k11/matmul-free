@@ -6,6 +6,11 @@
 
 namespace matmul_free {
 
+struct FFNActivations {
+    std::vector<std::vector<float>> hidden_seq;
+    std::vector<std::vector<float>> activated_seq;
+};
+
 /**
  * Two-layer feed-forward network with GELU activations.
  * When USE_CUDA is defined, weight1 and weight2 are also stored
@@ -58,14 +63,17 @@ struct FFN {
 
     std::vector<float> forward(const std::vector<float>& x) const;
     /** Batched GPU sequence forward — processes all T tokens in one SGEMM. */
-    std::vector<std::vector<float>> forward_sequence(const std::vector<std::vector<float>>& seq) const;
+    std::vector<std::vector<float>> forward_sequence(const std::vector<std::vector<float>>& seq,
+                                                    FFNActivations* act = nullptr) const;
     std::vector<float> forward_bitlinear(const std::vector<float>& x) const;
     /** Batched GPU sequence 1.58-bit BitLinear ternary forward (MatMul-Free: zero FP32 multiplies). */
     std::vector<std::vector<float>> forward_bitlinear_sequence(const std::vector<std::vector<float>>& seq) const;
     void backward_and_update(const std::vector<float>& x,
                              const std::vector<float>& output_grad,
                              float lr,
-                             std::vector<float>& grad_x);
+                             std::vector<float>& grad_x,
+                             const FFNActivations* act = nullptr,
+                             size_t token_idx = 0);
     void backward(std::vector<float>& grad_x, const std::vector<float>& output_grad);
 };
 

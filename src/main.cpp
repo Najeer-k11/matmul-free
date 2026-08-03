@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "chat" || arg == "train" || arg == "generate" || arg == "benchmark" || arg == "demo" || arg == "help") {
+        if (arg == "chat" || arg == "train" || arg == "generate" || arg == "benchmark" || arg == "demo" || arg == "verify" || arg == "help") {
             mode = arg;
         } else if (arg == "--prompt" && i + 1 < argc) {
             prompt = argv[++i];
@@ -201,6 +201,45 @@ int main(int argc, char** argv) {
 
     if (mode == "help") {
         print_help(argv[0]);
+        return 0;
+    }
+
+    if (mode == "verify") {
+        std::cout << "=== Numerical Parity Verification ===\n";
+        AttentionLayer attn;
+        attn.input_dim = 128;
+        int head_dim = 32;
+        for (int h = 0; h < 4; ++h) {
+            std::vector<std::vector<float>> q_w(head_dim, std::vector<float>(128, 0.01f * (h + 1)));
+            std::vector<std::vector<float>> k_w(head_dim, std::vector<float>(128, 0.02f * (h + 1)));
+            std::vector<std::vector<float>> v_w(head_dim, std::vector<float>(128, 0.03f * (h + 1)));
+            attn.query_weights.push_back(q_w);
+            attn.key_weights.push_back(k_w);
+            attn.value_weights.push_back(v_w);
+        }
+        std::vector<std::vector<float>> inputs(16, std::vector<float>(128, 0.0f));
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            for (size_t j = 0; j < inputs[i].size(); ++j) {
+                inputs[i][j] = static_cast<float>(i + j) / 100.0f;
+            }
+        }
+        auto out_cpu = attn.forward(inputs);
+        attn.upload_to_gpu();
+        auto out_gpu = attn.forward(inputs);
+
+        float max_diff = 0.0f;
+        for (size_t i = 0; i < out_cpu.size(); ++i) {
+            for (size_t j = 0; j < out_cpu[i].size(); ++j) {
+                float diff = std::abs(out_cpu[i][j] - out_gpu[i][j]);
+                if (diff > max_diff) max_diff = diff;
+            }
+        }
+        std::cout << "Attention Layer Forward Max Abs Diff (CPU vs GPU batched): " << max_diff << "\n";
+        if (max_diff < 1e-4f) {
+            std::cout << ">> PASS: Batched GPU Attention matches CPU within tolerance (< 1e-4)!\n";
+        } else {
+            std::cout << ">> FAIL: Discrepancy detected (diff: " << max_diff << " >= 1e-4)\n";
+        }
         return 0;
     }
 

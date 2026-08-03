@@ -2,6 +2,7 @@
 
 #if defined(USE_CUDA)
 
+#include "../core/timing.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <iostream>
@@ -104,10 +105,10 @@ void GpuMatrix::gemv_device(const float* d_x, float* d_out) const {
 
 std::vector<float> GpuMatrix::gemv_cpu(const std::vector<float>& x) const {
     if (!d_ptr || rows == 0 || cols == 0 || x.empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
 
-    float *d_x = nullptr, *d_y = nullptr;
-    cudaMalloc(&d_x, cols * sizeof(float));
-    cudaMalloc(&d_y, rows * sizeof(float));
+    float* d_x = ScratchBufferManager::instance().get_float_in(cols);
+    float* d_y = ScratchBufferManager::instance().get_float_out(rows);
 
     cudaMemcpy(d_x, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, rows * sizeof(float));
@@ -118,8 +119,6 @@ std::vector<float> GpuMatrix::gemv_cpu(const std::vector<float>& x) const {
     std::vector<float> result(rows);
     cudaMemcpy(result.data(), d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
 
-    cudaFree(d_x);
-    cudaFree(d_y);
     return result;
 }
 
@@ -171,6 +170,7 @@ std::vector<float> GpuVector::download() const {
 std::vector<std::vector<float>> GpuMatrix::gemm_sequence(
         const std::vector<std::vector<float>>& seq_input) const {
     if (!d_ptr || rows == 0 || cols == 0 || seq_input.empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
 
     int T   = static_cast<int>(seq_input.size());   // num tokens
     int K   = cols;                                  // input features  (= W cols)
@@ -184,9 +184,8 @@ std::vector<std::vector<float>> GpuMatrix::gemm_sequence(
             flat_in[t * K + k] = seq_input[t][k];
     }
 
-    float *d_in = nullptr, *d_out = nullptr;
-    cudaMalloc(&d_in,  static_cast<size_t>(T) * K * sizeof(float));
-    cudaMalloc(&d_out, static_cast<size_t>(T) * N * sizeof(float));
+    float* d_in = ScratchBufferManager::instance().get_float_in(static_cast<size_t>(T) * K);
+    float* d_out = ScratchBufferManager::instance().get_float_out(static_cast<size_t>(T) * N);
     cudaMemset(d_out, 0, static_cast<size_t>(T) * N * sizeof(float));
     cudaMemcpy(d_in, flat_in.data(), flat_in.size() * sizeof(float), cudaMemcpyHostToDevice);
 
@@ -218,14 +217,11 @@ std::vector<std::vector<float>> GpuMatrix::gemm_sequence(
     std::vector<float> flat_out(static_cast<size_t>(T) * N);
     cudaMemcpy(flat_out.data(), d_out, flat_out.size() * sizeof(float), cudaMemcpyDeviceToHost);
 
-    cudaFree(d_in);
-    cudaFree(d_out);
-
-    // Unpack col-major [N x T] output to row-major [T x N] result
+    // Unpack col-major [N x T] output (ldc=N) to row-major [T x N] result
     std::vector<std::vector<float>> result(T, std::vector<float>(N));
     for (int t = 0; t < T; ++t)
         for (int n = 0; n < N; ++n)
-            result[t][n] = flat_out[n * T + t];  // col-major: col n, row t
+            result[t][n] = flat_out[t * N + n];
 
     return result;
 }

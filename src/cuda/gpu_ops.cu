@@ -1,4 +1,6 @@
 #include "gpu_ops.h"
+#include "gpu_buffer.h"
+#include "../core/timing.h"
 #include <iostream>
 #include <vector>
 #include <cuda_runtime.h>
@@ -72,6 +74,7 @@ void print_cuda_device_info() {
 std::vector<float> cuda_matmul_vector(const std::vector<std::vector<float>>& weight,
                                       const std::vector<float>& input) {
     if (weight.empty() || weight[0].empty() || input.empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
     int rows = static_cast<int>(weight.size());
     int cols = static_cast<int>(weight[0].size());
 
@@ -82,10 +85,9 @@ std::vector<float> cuda_matmul_vector(const std::vector<std::vector<float>>& wei
         }
     }
 
-    float *d_w = nullptr, *d_x = nullptr, *d_y = nullptr;
-    cudaMalloc(&d_w, rows * cols * sizeof(float));
-    cudaMalloc(&d_x, cols * sizeof(float));
-    cudaMalloc(&d_y, rows * sizeof(float));
+    float* d_w = ScratchBufferManager::instance().get_float_weight(static_cast<size_t>(rows) * cols);
+    float* d_x = ScratchBufferManager::instance().get_float_in(cols);
+    float* d_y = ScratchBufferManager::instance().get_float_out(rows);
 
     cudaMemcpy(d_w, flat_w.data(), rows * cols * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, input.data(), cols * sizeof(float), cudaMemcpyHostToDevice);
@@ -98,10 +100,6 @@ std::vector<float> cuda_matmul_vector(const std::vector<std::vector<float>>& wei
     std::vector<float> output(rows);
     cudaMemcpy(output.data(), d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
 
-    cudaFree(d_w);
-    cudaFree(d_x);
-    cudaFree(d_y);
-
     return output;
 }
 
@@ -109,6 +107,7 @@ std::vector<float> cuda_bitlinear_vector(const std::vector<std::vector<int8_t>>&
                                          const std::vector<float>& input,
                                          float scale) {
     if (weight_ternary.empty() || weight_ternary[0].empty() || input.empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
     int rows = static_cast<int>(weight_ternary.size());
     int cols = static_cast<int>(weight_ternary[0].size());
 
@@ -119,11 +118,9 @@ std::vector<float> cuda_bitlinear_vector(const std::vector<std::vector<int8_t>>&
         }
     }
 
-    int8_t* d_w = nullptr;
-    float *d_x = nullptr, *d_y = nullptr;
-    cudaMalloc(&d_w, rows * cols * sizeof(int8_t));
-    cudaMalloc(&d_x, cols * sizeof(float));
-    cudaMalloc(&d_y, rows * sizeof(float));
+    int8_t* d_w = ScratchBufferManager::instance().get_int8_weight(static_cast<size_t>(rows) * cols);
+    float* d_x = ScratchBufferManager::instance().get_float_in(cols);
+    float* d_y = ScratchBufferManager::instance().get_float_out(rows);
 
     cudaMemcpy(d_w, flat_w.data(), rows * cols * sizeof(int8_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, input.data(), cols * sizeof(float), cudaMemcpyHostToDevice);
@@ -136,10 +133,6 @@ std::vector<float> cuda_bitlinear_vector(const std::vector<std::vector<int8_t>>&
     std::vector<float> output(rows);
     cudaMemcpy(output.data(), d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
 
-    cudaFree(d_w);
-    cudaFree(d_x);
-    cudaFree(d_y);
-
     return output;
 }
 
@@ -147,6 +140,7 @@ std::vector<float> cuda_bitlinear_packed(const std::vector<std::vector<uint8_t>>
                                          const std::vector<float>& input,
                                          float scale) {
     if (packed_weight.empty() || packed_weight[0].empty() || input.empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
     int rows = static_cast<int>(packed_weight.size());
     int packed_cols = static_cast<int>(packed_weight[0].size());
     int cols = static_cast<int>(input.size());
@@ -158,11 +152,9 @@ std::vector<float> cuda_bitlinear_packed(const std::vector<std::vector<uint8_t>>
         }
     }
 
-    uint8_t* d_w = nullptr;
-    float *d_x = nullptr, *d_y = nullptr;
-    cudaMalloc(&d_w, rows * packed_cols * sizeof(uint8_t));
-    cudaMalloc(&d_x, cols * sizeof(float));
-    cudaMalloc(&d_y, rows * sizeof(float));
+    uint8_t* d_w = ScratchBufferManager::instance().get_uint8_weight(static_cast<size_t>(rows) * packed_cols);
+    float* d_x = ScratchBufferManager::instance().get_float_in(cols);
+    float* d_y = ScratchBufferManager::instance().get_float_out(rows);
 
     cudaMemcpy(d_w, flat_w.data(), rows * packed_cols * sizeof(uint8_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, input.data(), cols * sizeof(float), cudaMemcpyHostToDevice);
@@ -174,10 +166,6 @@ std::vector<float> cuda_bitlinear_packed(const std::vector<std::vector<uint8_t>>
 
     std::vector<float> output(rows);
     cudaMemcpy(output.data(), d_y, rows * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaFree(d_w);
-    cudaFree(d_x);
-    cudaFree(d_y);
 
     return output;
 }
@@ -289,6 +277,7 @@ std::vector<std::vector<float>> cuda_bitlinear_sequence(
     float scale
 ) {
     if (packed_weight.empty() || packed_weight[0].empty() || A.empty() || A[0].empty()) return {};
+    timing::ScopedCudaTimerAccumulator cuda_timer;
 
     int T = static_cast<int>(A.size());
     int K = unpacked_cols;
@@ -310,11 +299,9 @@ std::vector<std::vector<float>> cuda_bitlinear_sequence(
         }
     }
 
-    uint8_t* d_W = nullptr;
-    float *d_A = nullptr, *d_C = nullptr;
-    cudaMalloc(&d_W, N * packed_K * sizeof(uint8_t));
-    cudaMalloc(&d_A, T * K * sizeof(float));
-    cudaMalloc(&d_C, T * N * sizeof(float));
+    uint8_t* d_W = ScratchBufferManager::instance().get_uint8_weight(static_cast<size_t>(N) * packed_K);
+    float* d_A = ScratchBufferManager::instance().get_float_in(static_cast<size_t>(T) * K);
+    float* d_C = ScratchBufferManager::instance().get_float_out(static_cast<size_t>(T) * N);
 
     cudaMemcpy(d_W, flat_W.data(), N * packed_K * sizeof(uint8_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_A, flat_A.data(), T * K * sizeof(float), cudaMemcpyHostToDevice);
@@ -326,10 +313,6 @@ std::vector<std::vector<float>> cuda_bitlinear_sequence(
 
     std::vector<float> flat_C(T * N);
     cudaMemcpy(flat_C.data(), d_C, T * N * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cudaFree(d_W);
-    cudaFree(d_A);
-    cudaFree(d_C);
 
     std::vector<std::vector<float>> C(T, std::vector<float>(N));
     for (int t = 0; t < T; ++t) {

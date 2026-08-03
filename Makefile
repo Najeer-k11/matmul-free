@@ -7,6 +7,7 @@ HAS_NVCC := $(shell which nvcc 2>/dev/null)
 
 ifneq ($(HAS_NVCC),)
     CXXFLAGS += -DUSE_CUDA -I/usr/local/cuda/include -I/usr/include/cuda
+    NVCCFLAGS += -DUSE_CUDA
     CUDA_SRCS = $(shell find src -name "*.cu")
     CUDA_OBJS = $(patsubst src/%.cu, $(BUILD_DIR)/%.o, $(CUDA_SRCS))
     CUDA_LIBS = -L/usr/lib/x86_64-linux-gnu -lcublas -lcudart

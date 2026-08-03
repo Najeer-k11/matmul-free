@@ -1,7 +1,9 @@
 #include "attention.h"
 #include "../core/math_ops.h"
+#include "../core/timing.h"
 #include "../quantization/ternary.h"
 #include "../cuda/gpu_buffer.h"
+#include "../cuda/gpu_ops.h"
 #include <cmath>
 #include <algorithm>
 
@@ -38,7 +40,8 @@ void AttentionLayer::download_from_gpu() {
 #endif
 }
 
-std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::vector<float>>& inputs) const {
+std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::vector<float>>& inputs,
+                                       AttentionActivations* act) const {
     int num_tokens = static_cast<int>(inputs.size());
     int num_heads  = static_cast<int>(query_weights.size());
     
@@ -46,43 +49,45 @@ std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::v
                                            std::vector<float>(input_dim, 0.0f));
     if (num_tokens == 0 || num_heads == 0) return output;
 
+    if (act) {
+        act->heads.resize(num_heads);
+    }
+
     for (int h = 0; h < num_heads; ++h) {
         int head_dim = static_cast<int>(query_weights[h].size());
         float scale = head_dim > 0 ? 1.0f / std::sqrt(static_cast<float>(head_dim)) : 1.0f;
 
         std::vector<std::vector<float>> all_k(num_tokens);
         std::vector<std::vector<float>> all_v(num_tokens);
+        std::vector<std::vector<float>> all_q(num_tokens);
+        std::vector<std::vector<float>> all_weights(num_tokens);
 
 #if defined(USE_CUDA)
         bool use_gpu = !gpu_dirty &&
                        h < static_cast<int>(gpu_key_weights.size()) &&
                        gpu_key_weights[h].is_allocated();
-#else
-        constexpr bool use_gpu = false;
+        if (use_gpu) {
+            std::vector<std::vector<float>> k_seq = gpu_key_weights[h].gemm_sequence(inputs);
+            std::vector<std::vector<float>> v_seq = gpu_value_weights[h].gemm_sequence(inputs);
+            std::vector<std::vector<float>> q_seq = gpu_query_weights[h].gemm_sequence(inputs);
+            for (int j = 0; j < num_tokens; ++j) {
+                all_k[j] = apply_rope(k_seq[j], j, head_dim);
+                all_v[j] = v_seq[j];
+                all_q[j] = apply_rope(q_seq[j], j, head_dim);
+            }
+        } else {
 #endif
-
-        for (int j = 0; j < num_tokens; ++j) {
-#if defined(USE_CUDA)
-            if (use_gpu) {
-                all_k[j] = apply_rope(gpu_key_weights[h].gemv_cpu(inputs[j]), j, head_dim);
-                all_v[j] = gpu_value_weights[h].gemv_cpu(inputs[j]);
-            } else {
-#endif
+            for (int j = 0; j < num_tokens; ++j) {
                 all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j, head_dim);
                 all_v[j] = matmul_vector(value_weights[h], inputs[j]);
-#if defined(USE_CUDA)
+                all_q[j] = apply_rope(matmul_vector(query_weights[h], inputs[j]), j, head_dim);
             }
-#endif
+#if defined(USE_CUDA)
         }
+#endif
 
         for (int i = 0; i < num_tokens; ++i) {
-#if defined(USE_CUDA)
-            std::vector<float> q = apply_rope(
-                use_gpu ? gpu_query_weights[h].gemv_cpu(inputs[i]) : matmul_vector(query_weights[h], inputs[i]),
-                i, head_dim);
-#else
-            std::vector<float> q = apply_rope(matmul_vector(query_weights[h], inputs[i]), i, head_dim);
-#endif
+            const std::vector<float>& q = all_q[i];
 
             std::vector<float> scores(i + 1, 0.0f);
             float max_score = -1e9f;
@@ -104,6 +109,7 @@ std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::v
             for (int j = 0; j <= i; ++j) {
                 weights[j] /= (sum_exp + 1e-9f);
             }
+            all_weights[i] = weights;
 
             std::vector<float> attended_v(head_dim, 0.0f);
             for (int j = 0; j <= i; ++j) {
@@ -115,6 +121,13 @@ std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::v
             for (int d = 0; d < head_dim && d < input_dim; ++d) {
                 output[i][d] += attended_v[d];
             }
+        }
+
+        if (act) {
+            act->heads[h].all_k = std::move(all_k);
+            act->heads[h].all_v = std::move(all_v);
+            act->heads[h].all_q = std::move(all_q);
+            act->heads[h].all_weights = std::move(all_weights);
         }
     }
 
@@ -129,7 +142,9 @@ std::vector<std::vector<float>> AttentionLayer::forward(const std::vector<std::v
     return output;
 }
 
-std::vector<std::vector<float>> AttentionLayer::forward_bitlinear(const std::vector<std::vector<float>>& inputs) const {
+std::vector<std::vector<float>> AttentionLayer::forward_bitlinear(const std::vector<std::vector<float>>& inputs,
+                                       AttentionActivations* act) const {
+    (void)act;
     int num_tokens = static_cast<int>(inputs.size());
     int num_heads  = static_cast<int>(query_weights.size());
     
@@ -148,13 +163,34 @@ std::vector<std::vector<float>> AttentionLayer::forward_bitlinear(const std::vec
 
         std::vector<std::vector<float>> all_k(num_tokens);
         std::vector<std::vector<float>> all_v(num_tokens);
-        for (int j = 0; j < num_tokens; ++j) {
-            all_k[j] = apply_rope(bitlinear_vector(k_ternary, inputs[j], gamma_k), j, head_dim);
-            all_v[j] = bitlinear_vector(v_ternary, inputs[j], gamma_v);
+        std::vector<std::vector<float>> all_q(num_tokens);
+
+#if defined(USE_CUDA)
+        if (is_cuda_available() && !inputs.empty()) {
+            auto packed_q = pack_ternary_matrix(q_ternary);
+            auto packed_k = pack_ternary_matrix(k_ternary);
+            auto packed_v = pack_ternary_matrix(v_ternary);
+            auto q_seq = cuda_bitlinear_sequence(packed_q, inputs, input_dim, gamma_q);
+            auto k_seq = cuda_bitlinear_sequence(packed_k, inputs, input_dim, gamma_k);
+            auto v_seq = cuda_bitlinear_sequence(packed_v, inputs, input_dim, gamma_v);
+            for (int j = 0; j < num_tokens; ++j) {
+                all_k[j] = apply_rope(k_seq[j], j, head_dim);
+                all_v[j] = v_seq[j];
+                all_q[j] = apply_rope(q_seq[j], j, head_dim);
+            }
+        } else {
+#endif
+            for (int j = 0; j < num_tokens; ++j) {
+                all_k[j] = apply_rope(bitlinear_vector(k_ternary, inputs[j], gamma_k), j, head_dim);
+                all_v[j] = bitlinear_vector(v_ternary, inputs[j], gamma_v);
+                all_q[j] = apply_rope(bitlinear_vector(q_ternary, inputs[j], gamma_q), j, head_dim);
+            }
+#if defined(USE_CUDA)
         }
+#endif
 
         for (int i = 0; i < num_tokens; ++i) {
-            std::vector<float> q = apply_rope(bitlinear_vector(q_ternary, inputs[i], gamma_q), i, head_dim);
+            const std::vector<float>& q = all_q[i];
 
             std::vector<float> scores(i + 1, 0.0f);
             float max_score = -1e9f;
@@ -375,7 +411,9 @@ std::vector<std::vector<float>> AttentionLayer::forward_bitlinear_cached(
 void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& inputs,
                          const std::vector<std::vector<float>>& output_grads,
                          float lr,
-                         std::vector<std::vector<float>>& input_grads) {
+                         std::vector<std::vector<float>>& input_grads,
+                         const AttentionActivations* act) {
+    timing::ScopedTimerAccumulator timer(timing::g_stats.backward_attn_time_ms);
     int num_tokens = static_cast<int>(inputs.size());
     int num_heads  = static_cast<int>(query_weights.size());
     input_grads.assign(num_tokens, std::vector<float>(input_dim, 0.0f));
@@ -385,37 +423,48 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
         int head_dim = static_cast<int>(query_weights[h].size());
         float scale  = head_dim > 0 ? 1.0f / std::sqrt(static_cast<float>(head_dim)) : 1.0f;
 
-        std::vector<std::vector<float>> all_k(num_tokens);
-        std::vector<std::vector<float>> all_v(num_tokens);
-        for (int j = 0; j < num_tokens; ++j) {
-            all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j, head_dim);
-            all_v[j] = matmul_vector(value_weights[h], inputs[j]);
-        }
+        std::vector<std::vector<float>> all_k;
+        std::vector<std::vector<float>> all_v;
+        std::vector<std::vector<float>> all_q;
+        std::vector<std::vector<float>> all_weights;
 
-        std::vector<std::vector<float>> all_q(num_tokens);
-        std::vector<std::vector<float>> all_weights(num_tokens);
-        for (int i = 0; i < num_tokens; ++i) {
-            all_q[i] = apply_rope(matmul_vector(query_weights[h], inputs[i]), i, head_dim);
-            std::vector<float> scores(i + 1, 0.0f);
-            float max_score = -1e9f;
-            for (int j = 0; j <= i; ++j) {
-                float dot_val = 0.0f;
-                for (int d = 0; d < head_dim && d < static_cast<int>(all_q[i].size()) && d < static_cast<int>(all_k[j].size()); ++d) {
-                    dot_val += all_q[i][d] * all_k[j][d];
+        if (act && h < static_cast<int>(act->heads.size())) {
+            all_k = act->heads[h].all_k;
+            all_v = act->heads[h].all_v;
+            all_q = act->heads[h].all_q;
+            all_weights = act->heads[h].all_weights;
+        } else {
+            all_k.resize(num_tokens);
+            all_v.resize(num_tokens);
+            for (int j = 0; j < num_tokens; ++j) {
+                all_k[j] = apply_rope(matmul_vector(key_weights[h], inputs[j]), j, head_dim);
+                all_v[j] = matmul_vector(value_weights[h], inputs[j]);
+            }
+            all_q.resize(num_tokens);
+            all_weights.resize(num_tokens);
+            for (int i = 0; i < num_tokens; ++i) {
+                all_q[i] = apply_rope(matmul_vector(query_weights[h], inputs[i]), i, head_dim);
+                std::vector<float> scores(i + 1, 0.0f);
+                float max_score = -1e9f;
+                for (int j = 0; j <= i; ++j) {
+                    float dot_val = 0.0f;
+                    for (int d = 0; d < head_dim && d < static_cast<int>(all_q[i].size()) && d < static_cast<int>(all_k[j].size()); ++d) {
+                        dot_val += all_q[i][d] * all_k[j][d];
+                    }
+                    scores[j] = dot_val * scale;
+                    if (scores[j] > max_score) max_score = scores[j];
                 }
-                scores[j] = dot_val * scale;
-                if (scores[j] > max_score) max_score = scores[j];
+                float sum_exp = 0.0f;
+                std::vector<float> weights(i + 1, 0.0f);
+                for (int j = 0; j <= i; ++j) {
+                    weights[j] = std::exp(scores[j] - max_score);
+                    sum_exp += weights[j];
+                }
+                for (int j = 0; j <= i; ++j) {
+                    weights[j] /= (sum_exp + 1e-9f);
+                }
+                all_weights[i] = weights;
             }
-            float sum_exp = 0.0f;
-            std::vector<float> weights(i + 1, 0.0f);
-            for (int j = 0; j <= i; ++j) {
-                weights[j] = std::exp(scores[j] - max_score);
-                sum_exp += weights[j];
-            }
-            for (int j = 0; j <= i; ++j) {
-                weights[j] /= (sum_exp + 1e-9f);
-            }
-            all_weights[i] = weights;
         }
 
         std::vector<std::vector<float>> grad_v(num_tokens, std::vector<float>(head_dim, 0.0f));
@@ -457,6 +506,7 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
             grad_pre_k[i] = apply_rope(grad_k[i], -i, head_dim);
         }
 
+        #pragma omp parallel for if(num_tokens > 4)
         for (int i = 0; i < num_tokens; ++i) {
             const auto& inp = inputs[i];
             const auto& gq = grad_pre_q[i];
@@ -482,6 +532,7 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
             }
         }
 
+        #pragma omp parallel for if(num_tokens > 4)
         for (int i = 0; i < num_tokens; ++i) {
             const auto& gq = grad_pre_q[i];
             const auto& gk = grad_pre_k[i];
@@ -503,9 +554,6 @@ void AttentionLayer::backward_and_update(const std::vector<std::vector<float>>& 
             }
         }
     }
-#if defined(USE_CUDA)
-    gpu_dirty = true; // weights updated on CPU; GPU mirrors need refresh
-#endif
 }
 
 void AttentionLayer::backward(std::vector<std::vector<float>>& input_grads, 
