@@ -27,28 +27,51 @@ void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpu
         vocab_map_[vocab_[i]] = static_cast<int>(i);
     }
 
-    std::vector<std::vector<std::string>> sequences;
+    std::map<std::string, int> word_counts;
     for (const auto& line : corpus) {
         if (line.empty()) continue;
-        std::vector<std::string> seq;
+        std::string current_word;
         for (char c : line) {
             unsigned char uc = static_cast<unsigned char>(c);
             if (uc >= 32 && uc < 128) {
-                seq.push_back(std::string(1, c));
+                if (std::isspace(c)) {
+                    if (!current_word.empty()) {
+                        word_counts[current_word]++;
+                        current_word.clear();
+                    }
+                    word_counts[" "]++;
+                } else {
+                    current_word += c;
+                }
             }
         }
-        if (!seq.empty()) {
-            sequences.push_back(seq);
+        if (!current_word.empty()) {
+            word_counts[current_word]++;
+        }
+    }
+
+    struct WordSeq {
+        std::vector<std::string> symbols;
+        int count;
+    };
+
+    std::vector<WordSeq> word_seqs;
+    word_seqs.reserve(word_counts.size());
+    for (const auto& kv : word_counts) {
+        std::vector<std::string> syms;
+        for (char c : kv.first) syms.push_back(std::string(1, c));
+        if (!syms.empty()) {
+            word_seqs.push_back({syms, kv.second});
         }
     }
 
     while (static_cast<int>(vocab_.size()) < target_vocab_size) {
         std::map<std::pair<std::string, std::string>, int> pair_counts;
         
-        for (const auto& seq : sequences) {
-            if (seq.size() < 2) continue;
-            for (size_t i = 0; i + 1 < seq.size(); ++i) {
-                pair_counts[{seq[i], seq[i + 1]}]++;
+        for (const auto& ws : word_seqs) {
+            if (ws.symbols.size() < 2) continue;
+            for (size_t i = 0; i + 1 < ws.symbols.size(); ++i) {
+                pair_counts[{ws.symbols[i], ws.symbols[i + 1]}] += ws.count;
             }
         }
 
@@ -71,19 +94,19 @@ void BPETokenizer::build_vocab_from_corpus(const std::vector<std::string>& corpu
         vocab_.push_back(new_token);
         vocab_map_[new_token] = new_id;
 
-        for (auto& seq : sequences) {
-            std::vector<std::string> new_seq;
+        for (auto& ws : word_seqs) {
+            std::vector<std::string> new_syms;
             size_t i = 0;
-            while (i < seq.size()) {
-                if (i + 1 < seq.size() && seq[i] == best_pair.first && seq[i + 1] == best_pair.second) {
-                    new_seq.push_back(new_token);
+            while (i < ws.symbols.size()) {
+                if (i + 1 < ws.symbols.size() && ws.symbols[i] == best_pair.first && ws.symbols[i + 1] == best_pair.second) {
+                    new_syms.push_back(new_token);
                     i += 2;
                 } else {
-                    new_seq.push_back(seq[i]);
+                    new_syms.push_back(ws.symbols[i]);
                     i++;
                 }
             }
-            seq = new_seq;
+            ws.symbols = new_syms;
         }
     }
 }

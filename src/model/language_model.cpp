@@ -305,6 +305,14 @@ void LanguageModel::train(const std::vector<std::string>& training_data,
             }
             adamw_emb.update(token_embeddings, emb_grads, current_lr, adamw_step);
 
+#if defined(USE_CUDA)
+            if (is_cuda_available() && ((sample_idx + 1) % sync_interval == 0 || sample_idx + 1 == train_set.size())) {
+                for (auto& block : transformer_blocks) {
+                    block.upload_to_gpu();
+                }
+            }
+#endif
+
             if (sample_idx % 4 == 0 || sample_idx + 1 == train_set.size()) {
                 float batch_pct = ((sample_idx + 1) * 100.0f) / static_cast<float>(total_sentences);
                 float curr_avg = total_train_loss / static_cast<float>(sample_idx + 1);
